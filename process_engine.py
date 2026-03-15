@@ -11,47 +11,238 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 import sys
 
+
+# ===========================================================================
+# 1. UTILITIES
+# ===========================================================================
 # ---------------------------------------------------------------------------
-# F1: Confirm Test / Official / File / Folder
+# 1.1 Text / Header Normalization Utilities
 # ---------------------------------------------------------------------------
-def f1_confirm_test_file_folder():
+# ---------------------------------------------------------------------------
+# 1.1.1 Utility: Normalize Text
+# ---------------------------------------------------------------------------
+def normalize_text(value):
     """
-    Launches a PyQt5 widget to confirm:
-      - Test or Official
-      - If Official: File or Folder
-      - If Official + File: Clear table?
-      - If Official + Folder: clear_table defaults to 'yes'
-      - If Test: file_folder defaults to 'file', clear_table = None
+    Convert a value to a clean lowercase comparison string.
 
-    Returns:
-      test_official, file_folder, clear_table
+    Purpose:
+    - handles NaN safely
+    - strips leading / trailing spaces
+    - lowercases text
     """
-    app = QApplication.instance()
-    owns_app = False
+    if pd.isna(value):
+        return ""
 
-    if app is None:
-        app = QApplication(sys.argv)
-        owns_app = True
-
-    widget = ConfirmRunTypeWidget()
-    widget.show()
-    app.exec_()
-
-    if widget.user_closed_without_submit:
-        raise Exception("User cancelled Step 1 confirmation widget.")
-
-    test_official = widget.test_official
-    file_folder = widget.file_folder
-    clear_table = widget.clear_table
-
-    if owns_app:
-        app.quit()
-
-    return test_official, file_folder, clear_table
-
+    return str(value).strip().lower()
 
 # ---------------------------------------------------------------------------
-# Widget: Confirm Run Type / File / Folder / Clear Table
+# 1.1.2 Utility: Normalize Text Preserve Case
+# ---------------------------------------------------------------------------
+def normalize_text_preserve_case(value):
+    """
+    Convert a value to a clean text string while preserving original casing.
+
+    Purpose:
+    - useful where we want clean display text
+    - removes line breaks
+    - trims leading / trailing spaces
+    - collapses repeated internal spaces
+    """
+    if pd.isna(value):
+        return ""
+
+    value = str(value)
+    value = value.replace("\n", " ").replace("\r", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+
+    return value
+
+# ---------------------------------------------------------------------------
+# 1.1.3 Utility: Normalize Column Headers
+# ---------------------------------------------------------------------------
+def normalize_column_headers(df):
+    """
+    Return a copy of df with cleaned column headers.
+
+    Purpose:
+    - makes header matching more reliable
+    - removes line breaks
+    - trims spaces
+    - collapses repeated spaces
+    """
+    df = df.copy()
+
+    cleaned_columns = []
+    for col in df.columns:
+        cleaned_col = normalize_text_preserve_case(col)
+        cleaned_columns.append(cleaned_col)
+
+    df.columns = cleaned_columns
+    return df
+
+# ---------------------------------------------------------------------------
+# 1.2 DataFrame Search / Structure Utilities
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 1.2.1 Utility: Find Row Index By First Column Value
+# ---------------------------------------------------------------------------
+def find_row_index_by_first_column_value(df, target_text):
+    """
+    Find the first row index where column 0 matches target_text
+    after normalization.
+    """
+    try:
+        target_text_norm = normalize_text(target_text)
+
+        for idx in df.index:
+            cell_value = df.iloc[idx, 0]
+            if normalize_text(cell_value) == target_text_norm:
+                return idx
+
+        return None
+
+    except Exception as e:
+        print(f"🔴 Error in find_row_index_by_first_column_value: {e}")
+        print(traceback.format_exc())
+        return None
+
+# ---------------------------------------------------------------------------
+# 1.2.2 Utility: Set Header From Row
+# ---------------------------------------------------------------------------
+def set_header_from_row(df, header_row_idx):
+    """
+    Use the specified row as the column header row,
+    then drop that row and all rows above it.
+    """
+    df = df.copy()
+
+    df.columns = df.iloc[header_row_idx]
+    df = df.drop(df.index[:header_row_idx + 1])
+    df = df.reset_index(drop=True)
+
+    return df
+
+# ---------------------------------------------------------------------------
+# 1.2.3 Utility: Drop Blank Rows By Column Position
+# ---------------------------------------------------------------------------
+def drop_blank_rows_by_column_position(df, column_position):
+    """
+    Drop rows where the specified column position is blank / NaN.
+    """
+    df = df.copy()
+
+    if column_position >= len(df.columns):
+        print(f"🟠 column_position {column_position} is outside df columns.")
+        return df
+
+    target_col = df.columns[column_position]
+    df = df.dropna(subset=[target_col])
+
+    return df
+
+# ---------------------------------------------------------------------------
+# 1.2.4 Utility: Drop Fully Blank Rows
+# ---------------------------------------------------------------------------
+def drop_fully_blank_rows(df):
+    """
+    Drop rows where every value is blank / NaN.
+    """
+    df = df.copy()
+    df = df.dropna(how="all")
+    df = df.reset_index(drop=True)
+    return df
+
+# ---------------------------------------------------------------------------
+# 1.2.5 Utility: Keep Rows Where Column Not Blank
+# ---------------------------------------------------------------------------
+def keep_rows_where_column_not_blank(df, column_name):
+    """
+    Keep only rows where the target column is not blank
+    after normalization.
+    """
+    df = df.copy()
+
+    if column_name not in df.columns:
+        print(f"🟠 Column not found for non-blank filter: {column_name}")
+        return df
+
+    df = df[
+        df[column_name].apply(lambda x: normalize_text(x) != "")
+    ].reset_index(drop=True)
+
+    return df
+
+# ---------------------------------------------------------------------------
+# 1.2.6 Utility: Keep Rows Where Column Is Numeric
+# ---------------------------------------------------------------------------
+def keep_rows_where_column_is_numeric(df, column_name):
+    """
+    Keep only rows where the target column can be converted to numeric.
+    """
+    df = df.copy()
+
+    if column_name not in df.columns:
+        print(f"🟠 Column not found for numeric filter: {column_name}")
+        return df
+
+    df[column_name] = pd.to_numeric(df[column_name], errors="coerce")
+    df = df[df[column_name].notna()].reset_index(drop=True)
+
+    return df
+
+# ---------------------------------------------------------------------------
+# 1.3 File Reading Utilities
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 1.3.1 Utility: Read Raw First Sheet
+# ---------------------------------------------------------------------------
+def read_raw_first_sheet(file_path, header=None):
+    """
+    Read the first sheet of an Excel file using pandas.
+    """
+    print(f"   [UTILITY] Reading raw first sheet: {file_path}")
+    return pd.read_excel(file_path, sheet_name=0, header=header)
+
+# ---------------------------------------------------------------------------
+# 1.4 Reader Registry Utilities
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 1.4.1 Utility: Reader Registry
+# ---------------------------------------------------------------------------
+READER_REGISTRY = {}
+
+# ---------------------------------------------------------------------------
+# 1.4.2 Utility: Register Reader
+# ---------------------------------------------------------------------------
+def register_reader(comm_type):
+    """
+    Decorator to register a reader function against a comm_type label.
+    """
+    def decorator(func):
+        READER_REGISTRY[comm_type] = func
+        return func
+
+    return decorator
+
+# ---------------------------------------------------------------------------
+# 1.4.3 Utility: Get Reader For Comm Type
+# ---------------------------------------------------------------------------
+def get_reader_for_comm_type(comm_type):
+    """
+    Return the registered reader function for the comm_type.
+    """
+    reader_func = READER_REGISTRY.get(comm_type)
+    print(f"   [ENGINE] get_reader_for_comm_type('{comm_type}') -> {reader_func}")
+    return reader_func
+
+# ===========================================================================
+# 2. WIDGET CLASSES
+# ===========================================================================
+# ---------------------------------------------------------------------------
+# 2.1 Run / Mode Selection Widget Classes
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 2.1.1 Widget Class: Confirm Run Type Widget
 # ---------------------------------------------------------------------------
 class ConfirmRunTypeWidget(QWidget):
     def __init__(self):
@@ -84,7 +275,7 @@ class ConfirmRunTypeWidget(QWidget):
         info.setWordWrap(True)
         main_layout.addWidget(info)
 
-        # Test / Official
+        # Run Type
         run_type_layout = QHBoxLayout()
         run_type_label = QLabel("Run Type:")
         self.run_type_combo = QComboBox()
@@ -133,7 +324,6 @@ class ConfirmRunTypeWidget(QWidget):
         import_mode = self.file_folder_combo.currentText().strip().lower()
 
         if run_type == "test":
-            # test => defaults to file, clear_table irrelevant
             self.file_folder_label.hide()
             self.file_folder_combo.hide()
 
@@ -148,7 +338,6 @@ class ConfirmRunTypeWidget(QWidget):
                 self.clear_table_label.show()
                 self.clear_table_combo.show()
             else:
-                # official + folder => clear_table defaults to yes
                 self.clear_table_label.hide()
                 self.clear_table_combo.hide()
 
@@ -191,10 +380,12 @@ class ConfirmRunTypeWidget(QWidget):
         if self.user_closed_without_submit:
             self.user_closed_without_submit = True
         event.accept()
-        
-        
+
 # ---------------------------------------------------------------------------
-# F3A Widget: Prompt User To Pick File Or Folder
+# 2.2 File / Folder Selection Widget Classes
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 2.2.1 Widget Class: File / Folder Picker Widget
 # ---------------------------------------------------------------------------
 class FileFolderPickerWidget(QDialog):
     def __init__(self, file_folder="file", parent=None):
@@ -212,17 +403,13 @@ class FileFolderPickerWidget(QDialog):
     def init_ui(self):
         main_layout = QVBoxLayout()
 
-        # -------------------------------------------------------------------
         # Title
-        # -------------------------------------------------------------------
         title_label = QLabel("Select the required input")
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
         main_layout.addWidget(title_label)
 
-        # -------------------------------------------------------------------
         # Mode label
-        # -------------------------------------------------------------------
         if self.file_folder == "folder":
             mode_text = "Mode selected: Folder import"
         else:
@@ -233,9 +420,7 @@ class FileFolderPickerWidget(QDialog):
         self.mode_label.setStyleSheet("font-size: 13px;")
         main_layout.addWidget(self.mode_label)
 
-        # -------------------------------------------------------------------
         # Selected path display
-        # -------------------------------------------------------------------
         self.path_label = QLabel("No path selected yet.")
         self.path_label.setWordWrap(True)
         self.path_label.setStyleSheet(
@@ -243,9 +428,7 @@ class FileFolderPickerWidget(QDialog):
         )
         main_layout.addWidget(self.path_label)
 
-        # -------------------------------------------------------------------
         # Browse button row
-        # -------------------------------------------------------------------
         browse_layout = QHBoxLayout()
 
         self.browse_button = QPushButton("Browse")
@@ -254,9 +437,7 @@ class FileFolderPickerWidget(QDialog):
 
         main_layout.addLayout(browse_layout)
 
-        # -------------------------------------------------------------------
         # Continue / Exit buttons
-        # -------------------------------------------------------------------
         button_layout = QHBoxLayout()
 
         self.continue_button = QPushButton("Continue")
@@ -283,9 +464,9 @@ class FileFolderPickerWidget(QDialog):
         else:
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
-                "Select Excel File",
+                "Select File",
                 "",
-                "Excel Files (*.xlsx *.xls *.xlsm *.xlsb)"
+                "Excel Files (*.xlsx *.xls *.xlsm)"
             )
             if file_path:
                 self.selected_path = file_path
@@ -296,145 +477,17 @@ class FileFolderPickerWidget(QDialog):
             QMessageBox.warning(
                 self,
                 "No Selection",
-                "Please select a file or folder before continuing."
+                "Please browse and select a valid file or folder first."
             )
             return
 
         self.accept()
-        
-# ---------------------------------------------------------------------------
-# F3A: Prompt User To Pick File Or Folder
-# ---------------------------------------------------------------------------
-def f3a_prompt_user_to_pick_file_or_folder(file_folder):
-    """
-    Launch a PyQt5 widget to let the user select either:
-    - a single Excel file
-    - a folder containing Excel files
-
-    Returns:
-        selected_path (str) if confirmed
-        None if cancelled
-    """
-    print("   [F3A] Launching file/folder picker widget...")
-    print(f"   [F3A] file_folder mode received: {file_folder}")
-
-    app = QApplication.instance()
-    app_created_here = False
-
-    if app is None:
-        app = QApplication([])
-        app_created_here = True
-
-    dialog = FileFolderPickerWidget(file_folder=file_folder)
-    result = dialog.exec_()
-
-    selected_path = dialog.selected_path if result == QDialog.Accepted else None
-
-    print(f"   [F3A] selected_path: {selected_path}")
-
-    if app_created_here:
-        app.quit()
-
-    return selected_path
-
-      # ---------------------------------------------------------------------------
-
-# Reader Registry
-# ---------------------------------------------------------------------------
-READER_REGISTRY = {} 
 
 # ---------------------------------------------------------------------------
-# Utility: Register Reader
+# 2.3 Comm Type Selection Widget Classes
 # ---------------------------------------------------------------------------
-def register_reader(comm_type):
-    """
-    Decorator to register a reader function against a comm_type.
-    """
-    def decorator(func):
-        READER_REGISTRY[comm_type] = func
-        return func
-    return decorator     
-
 # ---------------------------------------------------------------------------
-# Utility: Get Reader For Comm Type
-# ---------------------------------------------------------------------------
-def get_reader_for_comm_type(comm_type):
-    reader_func = READER_REGISTRY.get(comm_type)
-    print(f"   [ENGINE] get_reader_for_comm_type('{comm_type}') -> {reader_func}")
-    return reader_func
-
-# ---------------------------------------------------------------------------
-# Utility: Normalize Text
-# ---------------------------------------------------------------------------
-def normalize_text(value):
-    if pd.isna(value):
-        return ""
-    return str(value).strip().lower()
-
-# ---------------------------------------------------------------------------
-# Utility: Find Row Index By First Column Value
-# ---------------------------------------------------------------------------
-def find_row_index_by_first_column_value(df, target_text):
-    """
-    Finds the first row index where column 0 equals target_text after normalization.
-    """
-    try:
-        target_text_norm = normalize_text(target_text)
-
-        for idx in df.index:
-            cell_value = df.iloc[idx, 0]
-            if normalize_text(cell_value) == target_text_norm:
-                return idx
-
-        return None
-
-    except Exception as e:
-        print(f"🔴 Error in find_row_index_by_first_column_value: {e}")
-        print(traceback.format_exc())
-        return None
-    
-# ---------------------------------------------------------------------------
-# Utility: Set Header From Row
-# ---------------------------------------------------------------------------
-def set_header_from_row(df, header_row_idx):
-    """
-    Use a row as the dataframe header, then remove rows above it.
-    """
-    df = df.copy()
-    df.columns = df.iloc[header_row_idx]
-    df = df.drop(df.index[:header_row_idx + 1])
-    df = df.reset_index(drop=True)
-    return df
-
-# ---------------------------------------------------------------------------
-# Utility: Drop Blank Rows By Column Position
-# ---------------------------------------------------------------------------
-def drop_blank_rows_by_column_position(df, column_position):
-    """
-    Drops rows where the specified column position is blank / NaN.
-    """
-    df = df.copy()
-
-    if column_position >= len(df.columns):
-        print(f"🟠 column_position {column_position} is outside df columns.")
-        return df
-
-    target_col = df.columns[column_position]
-    df = df.dropna(subset=[target_col])
-
-    return df
-
-# ---------------------------------------------------------------------------
-# Utility: Read Raw First Sheet
-# ---------------------------------------------------------------------------
-def read_raw_first_sheet(file_path, header=None):
-    print(f"   [UTILITY] Reading raw first sheet: {file_path}")
-    return pd.read_excel(file_path, sheet_name=0, header=header)
-
-
-            
-# ---------------------------------------------------------------------------
-# Widget: Prompt Comm Type Selection
+# 2.3.1 Widget Class: Comm Type Selection Widget
 # ---------------------------------------------------------------------------
 class CommTypeSelectionWidget(QDialog):
     def __init__(self, detected_comm_type=None, parent=None):
@@ -495,93 +548,220 @@ class CommTypeSelectionWidget(QDialog):
         self.accept()
 
 # ---------------------------------------------------------------------------
-# Widget: Processing Error
+# 2.4.1 Widget Class: Processing Error Widget
 # ---------------------------------------------------------------------------
 class ProcessingErrorWidget(QDialog):
     def __init__(self, file_path, error_message, parent=None):
         super().__init__(parent)
-
         self.file_path = file_path
         self.error_message = error_message
-
         self.setWindowTitle("Processing Error")
         self.resize(700, 250)
         self.setModal(True)
-
         self.init_ui()
-
+        
     def init_ui(self):
         layout = QVBoxLayout()
-
         title = QLabel("An error occurred while processing the file.")
         title.setStyleSheet("font-size: 14px; font-weight: bold;")
         layout.addWidget(title)
-
         file_label = QLabel(f"File: {self.file_path}")
         file_label.setWordWrap(True)
         layout.addWidget(file_label)
-
         error_box = QTextEdit()
         error_box.setReadOnly(True)
         error_box.setText(str(self.error_message))
         layout.addWidget(error_box)
-
         ok_button = QPushButton("OK")
         ok_button.clicked.connect(self.accept)
         layout.addWidget(ok_button)
-
         self.setLayout(layout)
-        
+
+# ===========================================================================
+# 3. WIDGET LAUNCHER / WRAPPER FUNCTIONS
+# ===========================================================================
+# ---------------------------------------------------------------------------
+# 3.1.1 Function: Confirm Test / Official / File / Folder
+# ---------------------------------------------------------------------------
+def f3_1_1_confirm_test_file_folder():
+    """
+    Launch the run-type confirmation widget.
+
+    Returns:
+        test_official, file_folder, clear_table
+    """
+    print("------------------------------------------------------------")
+    print("🟦 3.1.1 Launch Confirm Run Type Widget")
+
+    app = QApplication.instance()
+    owns_app = False
+
+    if app is None:
+        app = QApplication(sys.argv)
+        owns_app = True
+
+    widget = ConfirmRunTypeWidget()
+    widget.show()
+    app.exec_()
+
+    if widget.user_closed_without_submit:
+        raise Exception("User cancelled Step 1 confirmation widget.")
+
+    test_official = widget.test_official
+    file_folder = widget.file_folder
+    clear_table = widget.clear_table
+
+    print(f"   test_official: {test_official}")
+    print(f"   file_folder  : {file_folder}")
+    print(f"   clear_table  : {clear_table}")
+
+    if owns_app:
+        app.quit()
+
+    return test_official, file_folder, clear_table
 
 # ---------------------------------------------------------------------------
-# Reader: AGBus
+# 3.2.1 Function: Prompt User To Pick File Or Folder
 # ---------------------------------------------------------------------------
-@register_reader("AGBus")
-def read_agbus_df(file_path, **kwargs):
-    try:
-        print("------------------------------------------------------------")
-        print("🧾 Reader: read_agbus_df")
-        print(f"   file_path: {file_path}")
+def f3_2_1_prompt_user_to_pick_file_or_folder(file_folder="file"):
+    """
+    Launch the file/folder picker widget.
 
-        # Step 1: Read raw file
-        print("🟦 Step 1: Read raw first sheet")
-        df = read_raw_first_sheet(file_path, header=None)
-        print(f"   raw shape: {df.shape}")
+    Args:
+        file_folder: 'file' or 'folder'
 
-        # Step 2: Find 'Earning Year' row
-        print("🟦 Step 2: Find 'Earning Year' row")
-        header_row_idx = find_row_index_by_first_column_value(df, "Earning Year")
-        print(f"   header_row_idx: {header_row_idx}")
+    Returns:
+        selected_path or None
+    """
+    print("------------------------------------------------------------")
+    print("🟦 3.2.1 Launch File / Folder Picker Widget")
+    print(f"   requested mode: {file_folder}")
 
-        if header_row_idx is None:
-            print("🔴 'Earning Year' row not found.")
-            return None
+    app = QApplication.instance()
+    app_created_here = False
 
-        # Step 3: Set header from row
-        print("🟦 Step 3: Set header from target row")
-        df = set_header_from_row(df, header_row_idx)
-        print(f"   shape after header set: {df.shape}")
+    if app is None:
+        app = QApplication(sys.argv)
+        app_created_here = True
 
-        # Step 4: Drop blank rows by second column
-        print("🟦 Step 4: Drop blank rows from second column")
-        df = drop_blank_rows_by_column_position(df, 1)
-        print(f"   final shape: {df.shape}")
+    dialog = FileFolderPickerWidget(file_folder=file_folder)
+    result = dialog.exec_()
 
-        return df
+    selected_path = dialog.selected_path if result == QDialog.Accepted else None
 
-    except Exception as e:
-        print(f"🔴 Error in read_agbus_df: {e}")
-        print(traceback.format_exc())
-        return None
+    print(f"   selected_path: {selected_path}")
+
+    if app_created_here:
+        app.quit()
+
+    return selected_path
 
 # ---------------------------------------------------------------------------
-# F4.2.1: Detect Comm Type From Filename
+# 3.3.1 Function: Prompt Comm Type Only If Needed
 # ---------------------------------------------------------------------------
-def f4_2_1_detect_comm_type_label(file_path):
+def f3_3_1_prompt_comm_type_only_if_needed(detected_comm_type=None):
+    """
+    Launch the comm type selection widget and return the selected type.
+    """
+    print("------------------------------------------------------------")
+    print("🟦 3.3.1 Launch Comm Type Selection Widget")
+    print(f"   detected_comm_type: {detected_comm_type}")
+
+    app = QApplication.instance()
+    app_created_here = False
+
+    if app is None:
+        app = QApplication([])
+        app_created_here = True
+
+    dialog = CommTypeSelectionWidget(detected_comm_type=detected_comm_type)
+    result = dialog.exec_()
+
+    selected_comm_type = dialog.selected_comm_type if result == QDialog.Accepted else None
+
+    print(f"   selected_comm_type: {selected_comm_type}")
+
+    if app_created_here:
+        app.quit()
+
+    return selected_comm_type
+
+# ---------------------------------------------------------------------------
+# 3.4.1 Function: Show Processing Error Widget
+# ---------------------------------------------------------------------------
+def f3_4_1_show_processing_error_widget(file_path, error_message):
+    """
+    Show a processing error dialog for the current file.
+    """
+    print("------------------------------------------------------------")
+    print("🟦 3.4.1 Show Processing Error Widget")
+    print(f"   file_path    : {file_path}")
+    print(f"   error_message: {error_message}")
+
+    app = QApplication.instance()
+    app_created_here = False
+
+    if app is None:
+        app = QApplication([])
+        app_created_here = True
+
+    dialog = ProcessingErrorWidget(file_path=file_path, error_message=error_message)
+    dialog.exec_()
+
+    if app_created_here:
+        app.quit()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ===========================================================================
+# 4. COMM TYPE DETECTION / ROUTING FUNCTIONS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 4.1 Filename Detection Functions
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 4.1.1 Function: Detect Comm Type Label From Filename
+# ---------------------------------------------------------------------------
+def f4_1_1_detect_comm_type_label(file_path):
+    """
+    Detect the commission type label from the file name.
+
+    Returns:
+        detected label such as 'AGBus', 'AGPers', 'Bidvest', etc.
+        or None if no match is found.
+    """
     file_name = os.path.basename(file_path).lower().strip()
 
     print("------------------------------------------------------------")
-    print("🟦 Detect comm type from filename")
+    print("🟦 4.1.1 Detect comm type from filename")
     print(f"   file_name: {file_name}")
 
     detection_map = {
@@ -615,7 +795,6 @@ def f4_2_1_detect_comm_type_label(file_path):
         "kaelo": "Kaelo",
         "momentum_mandy": "Momentum_Mandy",
         "momentum_mfp": "Momentum_MFP",
-        "mfp": "Momentum_MFP",
         "mua": "MUA",
         "nedgroup": "Nedgroup",
         "old_mutual_short_term": "Old_Mutual_Short_Term",
@@ -632,46 +811,23 @@ def f4_2_1_detect_comm_type_label(file_path):
         "zestlife": "Zestlife",
     }
 
-    for key_text, comm_type in detection_map.items():
-        if key_text in file_name:
-            print(f"✅ Matched '{key_text}' -> '{comm_type}'")
-            return comm_type
+    for key, value in detection_map.items():
+        if key in file_name:
+            print(f"✅ Detected comm type: {value}")
+            return value
 
     print("🟠 No comm type detected from filename.")
     return None
 
-
 # ---------------------------------------------------------------------------
-# F4.2.2: Prompt Comm Type Only If Needed
+# 4.2 Reader Routing Functions
 # ---------------------------------------------------------------------------
-def f4_2_2_prompt_comm_type_only_if_needed(detected_comm_type=None):
-    print("   [ENGINE] Launching comm type selection widget...")
-    print(f"   [ENGINE] detected_comm_type: {detected_comm_type}")
-
-    app = QApplication.instance()
-    app_created_here = False
-
-    if app is None:
-        app = QApplication([])
-        app_created_here = True
-
-    dialog = CommTypeSelectionWidget(detected_comm_type=detected_comm_type)
-    result = dialog.exec_()
-
-    selected_comm_type = dialog.selected_comm_type if result == QDialog.Accepted else None
-
-    print(f"   [ENGINE] selected_comm_type: {selected_comm_type}")
-
-    if app_created_here:
-        app.quit()
-
-    return selected_comm_type
 
 
 # ---------------------------------------------------------------------------
-# F4.4: Run Engineered Reader
+# 4.2.1 Function: Run Engineered Reader
 # ---------------------------------------------------------------------------
-def f4_4_run_engineered_reader(comm_type, file_path, comm_month, comm_tables_main_df, reader_func=None):
+def f4_2_1_run_engineered_reader(comm_type, file_path, comm_month, comm_tables_main_df, reader_func=None):
     print("------------------------------------------------------------")
     print("🟦 Step 4: Run engineered reader")
     print(f"   comm_type          : {comm_type}")
@@ -679,12 +835,15 @@ def f4_4_run_engineered_reader(comm_type, file_path, comm_month, comm_tables_mai
     print(f"   comm_month         : {comm_month}")
     print(f"   comm_tables_main_df shape: {comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}")
 
+
     if reader_func is None:
         reader_func = get_reader_for_comm_type(comm_type)
+
 
     if reader_func is None:
         print(f"🔴 No reader found for comm_type: {comm_type}")
         return None
+
 
     engineered_df = reader_func(
         file_path=file_path,
@@ -692,35 +851,275 @@ def f4_4_run_engineered_reader(comm_type, file_path, comm_month, comm_tables_mai
         comm_tables_main_df=comm_tables_main_df
     )
 
+
     if engineered_df is None:
         print("🔴 Reader returned None.")
         return None
+
 
     if isinstance(engineered_df, pd.DataFrame):
         print(f"✅ Reader returned DataFrame with shape: {engineered_df.shape}")
     else:
         print(f"🟠 Reader returned object type: {type(engineered_df)}")
 
+
     return engineered_df
 
 
+# ===========================================================================
+# 5. READER FUNCTIONS
+# ===========================================================================
 # ---------------------------------------------------------------------------
-# F4.5: Show Processing Error Widget
+# 5.1 Header-Row Reader Functions
 # ---------------------------------------------------------------------------
-def f4_5_show_processing_error_widget(file_path, error_message):
-    print("   [ENGINE] Showing processing error widget...")
-    print(f"   [ENGINE] file_path    : {file_path}")
-    print(f"   [ENGINE] error_message: {error_message}")
+# ---------------------------------------------------------------------------
+# 5.1.1 Reader: AGBus
+# ---------------------------------------------------------------------------
+@register_reader("AGBus")
+def read_agbus_df(file_path, **kwargs):
+    """
+    Reader for AGBus commission statement files.
 
-    app = QApplication.instance()
-    app_created_here = False
+    Logic:
+    - read first sheet with no fixed header
+    - find row where first column = 'Earning Year'
+    - set that row as headers
+    - drop rows above
+    - drop blank rows based on second column
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.1.1 Reader: read_agbus_df")
+        print(f"   file_path: {file_path}")
 
-    if app is None:
-        app = QApplication([])
-        app_created_here = True
+        # Step 1: Read raw first sheet
+        print("🟦 Step 1: Read raw first sheet")
+        df = read_raw_first_sheet(file_path, header=None)
+        print(f"   raw shape: {df.shape}")
 
-    dialog = ProcessingErrorWidget(file_path=file_path, error_message=error_message)
-    dialog.exec_()
+        # Step 2: Find header row
+        print("🟦 Step 2: Find 'Earning Year' row")
+        header_row_idx = find_row_index_by_first_column_value(df, "Earning Year")
+        print(f"   header_row_idx: {header_row_idx}")
 
-    if app_created_here:
-        app.quit()
+        if header_row_idx is None:
+            print("🔴 'Earning Year' row not found.")
+            return None
+
+        # Step 3: Set header row
+        print("🟦 Step 3: Set header from target row")
+        df = set_header_from_row(df, header_row_idx)
+        print(f"   shape after header set: {df.shape}")
+
+        # Step 4: Normalize headers
+        print("🟦 Step 4: Normalize column headers")
+        df = normalize_column_headers(df)
+        print(f"   columns: {list(df.columns)}")
+
+        # Step 5: Drop blank rows by second column
+        print("🟦 Step 5: Drop blank rows from second column")
+        df = drop_blank_rows_by_column_position(df, 1)
+        print(f"   final shape: {df.shape}")
+
+        return df
+
+    except Exception as e:
+        print(f"🔴 Error in read_agbus_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+# ---------------------------------------------------------------------------
+# 5.2 Fixed-Header Reader Functions
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 5.2.1 Reader: Bidvest
+# ---------------------------------------------------------------------------
+@register_reader("Bidvest")
+def read_bidvest_df(file_path, **kwargs):
+    """
+    Reader for Bidvest commission statement files.
+
+    Logic:
+    - read first sheet using first row as header
+    - normalize headers
+    - drop fully blank rows
+    - keep rows where commission column is numeric
+    - keep rows where policy number is not blank
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.2.1 Reader: read_bidvest_df")
+        print(f"   file_path: {file_path}")
+
+        # Step 1: Read raw first sheet using row 1 as header
+        print("🟦 Step 1: Read raw first sheet with header row")
+        df = read_raw_first_sheet(file_path, header=0)
+        print(f"   raw shape: {df.shape}")
+        print(f"   raw columns before normalization: {list(df.columns)}")
+
+        # Step 2: Normalize headers
+        print("🟦 Step 2: Normalize column headers")
+        df = normalize_column_headers(df)
+        print(f"   normalized columns: {list(df.columns)}")
+
+        # Step 3: Drop fully blank rows
+        print("🟦 Step 3: Drop fully blank rows")
+        df = drop_fully_blank_rows(df)
+        print(f"   shape after dropping blank rows: {df.shape}")
+
+        # Step 4: Keep rows where commission is numeric
+        print("🟦 Step 4: Keep rows where 'Commission Incl. VAT' is numeric")
+        df = keep_rows_where_column_is_numeric(df, "Commission Incl. VAT")
+        print(f"   shape after commission numeric filter: {df.shape}")
+
+        # Step 5: Keep rows where policy number is not blank
+        print("🟦 Step 5: Keep rows where 'Policy No.' is not blank")
+        df = keep_rows_where_column_not_blank(df, "Policy No.")
+        print(f"   shape after policy filter: {df.shape}")
+
+        # Step 6: Reset index
+        print("🟦 Step 6: Reset index")
+        df = df.reset_index(drop=True)
+        print(f"   final shape: {df.shape}")
+
+        return df
+
+    except Exception as e:
+        print(f"🔴 Error in read_bidvest_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+# ---------------------------------------------------------------------------
+# 5.3 Range-Based / Openpyxl Reader Functions
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 5.4 Special-Layout Reader Functions
+# ---------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

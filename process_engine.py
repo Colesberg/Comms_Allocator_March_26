@@ -5603,6 +5603,1072 @@ def read_momentum_mandy_pdf_df(file_path, **kwargs):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Reader Functions Patch
+# ---------------------------------------------------------------------------
+# Purpose:
+# Paste these reader functions into process_engine.py under the
+# existing "5. READER FUNCTIONS" area.
+#
+# Notes:
+# - These readers are written to use the existing utilities already present in
+#   process_engine.py, in line with the current project structure.
+# - No new helper utilities are introduced.
+# - Sanlam and Sirago are written as fallback readers against an already-
+#   normalized sheet because the uploaded source examples only contained
+#   processed_data-style output, not the original raw statement layouts.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 5.4.2 Reader: Zestlife
+# ---------------------------------------------------------------------------
+@register_reader("Zestlife")
+def read_zestlife_df(file_path, **kwargs):
+    """
+    Reader for Zestlife commission statement files.
+
+    Expected source layout:
+    - workbook contains a rendered remittance-style sheet
+    - usable header row sits on Excel row 18
+    - data rows begin below that header
+
+    Returns normalized columns:
+    - client_name
+    - product_house
+    - commission_month
+    - contract_number
+    - total_commission
+    - planner
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.2 Reader: read_zestlife_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read best matching raw sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read best matching source sheet")
+        source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+            file_path=file_path,
+            required_column_candidates=[
+                ["Policy Number"],
+                ["Full Names", "Full Name"],
+                ["Surname"],
+                ["Sales Agent"],
+                ["Net Payable"],
+            ],
+            header=17,
+            exclude_sheet_names=["processed_data"],
+        )
+
+        print(f"   source_sheet_name: {source_sheet_name}")
+        print(f"   raw shape: {df.shape if isinstance(df, pd.DataFrame) else None}")
+
+        if df is None or df.empty:
+            print("🔴 No usable Zestlife sheet could be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Detect source columns")
+        contract_col = find_matching_column(df.columns, ["Policy Number"])
+        first_name_col = find_matching_column(df.columns, ["Full Names", "Full Name"])
+        surname_col = find_matching_column(df.columns, ["Surname"])
+        planner_col = find_matching_column(df.columns, ["Sales Agent"])
+        total_commission_col = find_matching_column(df.columns, ["Net Payable"])
+        status_col = find_matching_column(df.columns, ["Status"])
+        show_col = find_matching_column(df.columns, ["unnamed_1", "show"], allow_contains=False)
+
+        print(f"   contract_col          : {contract_col}")
+        print(f"   first_name_col        : {first_name_col}")
+        print(f"   surname_col           : {surname_col}")
+        print(f"   planner_col           : {planner_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   status_col            : {status_col}")
+        print(f"   show_col              : {show_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Zestlife columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if first_name_col and surname_col:
+            normalized_df["client_name"] = (
+                df[first_name_col].apply(normalize_text_preserve_case)
+                + " "
+                + df[surname_col].apply(normalize_text_preserve_case)
+            ).str.replace(r"\s+", " ", regex=True).str.strip()
+        elif first_name_col:
+            normalized_df["client_name"] = df[first_name_col].apply(normalize_text_preserve_case)
+        else:
+            normalized_df["client_name"] = ""
+
+        normalized_df["product_house"] = "zestlife"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df[contract_col].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df[total_commission_col])
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        print(f"   normalized_df shape before filters: {normalized_df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 4: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Filter invalid rows")
+
+        if show_col is not None:
+            show_mask = df[show_col].apply(lambda x: normalize_text(x) in ["show", ""])
+            normalized_df = normalized_df[show_mask].copy()
+            print(f"   shape after show filter: {normalized_df.shape}")
+
+        if status_col is not None:
+            status_mask = df[status_col].apply(lambda x: normalize_text(x) not in ["", "policy details"])
+            normalized_df = normalized_df[status_mask].copy()
+            print(f"   shape after status filter: {normalized_df.shape}")
+
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Zestlife rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Zestlife normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_zestlife_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 5.4.3 Reader: SAU
+# ---------------------------------------------------------------------------
+@register_reader("SAU")
+def read_sau_df(file_path, **kwargs):
+    """
+    Reader for SAU commission statement files.
+
+    Expected source layout:
+    - workbook contains multiple summary tabs plus a Detail tab
+    - usable header row sits on Excel row 11
+    - Detail sheet contains line-item data
+
+    Current logic maps total_commission from 'Total Due' because that aligns
+    with the net payable commission value. If you later decide you want gross
+    including VAT instead, switch the source column to 'Total Incl. VAT'.
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.3 Reader: read_sau_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read best matching source sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read best matching source sheet")
+        source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+            file_path=file_path,
+            required_column_candidates=[
+                ["Client Name"],
+                ["Policy Number"],
+                ["Total Due"],
+                ["Agent"],
+            ],
+            header=10,
+            exclude_sheet_names=["processed_data"],
+        )
+
+        print(f"   source_sheet_name: {source_sheet_name}")
+        print(f"   raw shape: {df.shape if isinstance(df, pd.DataFrame) else None}")
+
+        if df is None or df.empty:
+            print("🔴 No usable SAU sheet could be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Detect source columns")
+        client_name_col = find_matching_column(df.columns, ["Client Name"])
+        contract_col = find_matching_column(df.columns, ["Policy Number"])
+        total_commission_col = find_matching_column(df.columns, ["Total Due"])
+        planner_col = find_matching_column(df.columns, ["Agent"])
+        description_col = find_matching_column(df.columns, ["Description"])
+
+        print(f"   client_name_col       : {client_name_col}")
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   planner_col           : {planner_col}")
+        print(f"   description_col       : {description_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required SAU columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if client_name_col:
+            normalized_df["client_name"] = df[client_name_col].apply(normalize_text_preserve_case)
+        else:
+            normalized_df["client_name"] = ""
+
+        normalized_df["product_house"] = "sau"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df[contract_col].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df[total_commission_col])
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        print(f"   normalized_df shape before filters: {normalized_df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 4: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Filter invalid rows")
+        if description_col is not None:
+            detail_mask = df[description_col].apply(lambda x: normalize_text(x) not in ["", "totals"])
+            normalized_df = normalized_df[detail_mask].copy()
+            print(f"   shape after description filter: {normalized_df.shape}")
+
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable SAU rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ SAU normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_sau_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 5.4.4 Reader: Stratum
+# ---------------------------------------------------------------------------
+@register_reader("Stratum")
+def read_stratum_df(file_path, **kwargs):
+    """
+    Reader for Stratum commission statement files.
+
+    Expected source layout:
+    - rendered statement workbook
+    - usable header row sits on Excel row 12
+    - detailed records follow directly below
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.4 Reader: read_stratum_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read best matching source sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read best matching source sheet")
+        source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+            file_path=file_path,
+            required_column_candidates=[
+                ["Policy Number"],
+                ["Name"],
+                ["Surname"],
+                ["Financial Advisor"],
+                ["Commission", "Total Due"],
+            ],
+            header=11,
+            exclude_sheet_names=["processed_data"],
+        )
+
+        print(f"   source_sheet_name: {source_sheet_name}")
+        print(f"   raw shape: {df.shape if isinstance(df, pd.DataFrame) else None}")
+
+        if df is None or df.empty:
+            print("🔴 No usable Stratum sheet could be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Detect source columns")
+        contract_col = find_matching_column(df.columns, ["Policy Number"])
+        first_name_col = find_matching_column(df.columns, ["Name"])
+        surname_col = find_matching_column(df.columns, ["Surname"])
+        planner_col = find_matching_column(df.columns, ["Financial Advisor"])
+        total_commission_col = find_matching_column(df.columns, ["Commission", "Total Due"])
+        status_col = find_matching_column(df.columns, ["Status"])
+
+        print(f"   contract_col          : {contract_col}")
+        print(f"   first_name_col        : {first_name_col}")
+        print(f"   surname_col           : {surname_col}")
+        print(f"   planner_col           : {planner_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   status_col            : {status_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Stratum columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if first_name_col and surname_col:
+            normalized_df["client_name"] = (
+                df[first_name_col].apply(normalize_text_preserve_case)
+                + " "
+                + df[surname_col].apply(normalize_text_preserve_case)
+            ).str.replace(r"\s+", " ", regex=True).str.strip()
+        elif first_name_col:
+            normalized_df["client_name"] = df[first_name_col].apply(normalize_text_preserve_case)
+        else:
+            normalized_df["client_name"] = ""
+
+        normalized_df["product_house"] = "stratum"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df[contract_col].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df[total_commission_col])
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        print(f"   normalized_df shape before filters: {normalized_df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 4: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Filter invalid rows")
+        if status_col is not None:
+            status_mask = df[status_col].apply(
+                lambda x: normalize_text(x) in ["live", "cancelled", "pending cancellation", ""]
+            )
+            normalized_df = normalized_df[status_mask].copy()
+            print(f"   shape after status filter: {normalized_df.shape}")
+
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Stratum rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Stratum normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_stratum_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 5.4.5 Reader: Turnberry
+# ---------------------------------------------------------------------------
+@register_reader("Turnberry")
+def read_turnberry_df(file_path, **kwargs):
+    """
+    Reader for Turnberry commission statement files.
+
+    Expected source layout:
+    - first sheet contains a statement heading block
+    - usable header row sits on Excel row 4
+    - planner name sits on Excel row 2, column A
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.5 Reader: read_turnberry_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read raw first sheet for planner capture
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read raw first sheet for planner capture")
+        raw_df = read_raw_first_sheet(file_path, header=None)
+        print(f"   raw_df shape: {raw_df.shape}")
+
+        if raw_df is None or raw_df.empty:
+            print("🔴 Raw Turnberry sheet returned no data.")
+            return None
+
+        planner_value = "UNIFY (PTY) LTD"
+        if raw_df.shape[0] > 1 and raw_df.shape[1] > 0:
+            planner_candidate = normalize_text_preserve_case(raw_df.iloc[1, 0])
+            if planner_candidate != "":
+                planner_value = planner_candidate
+
+        print(f"   planner_value: {planner_value}")
+
+        # -------------------------------------------------------------------
+        # Step 2: Read best matching structured sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Read best matching structured sheet")
+        source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+            file_path=file_path,
+            required_column_candidates=[
+                ["Policy No", "Policy Number"],
+                ["Commission incl Vat", "Commission"],
+                ["Name"],
+                ["Surname"],
+            ],
+            header=3,
+            exclude_sheet_names=["processed_data"],
+        )
+
+        print(f"   source_sheet_name: {source_sheet_name}")
+        print(f"   structured df shape: {df.shape if isinstance(df, pd.DataFrame) else None}")
+
+        if df is None or df.empty:
+            print("🔴 No usable Turnberry sheet could be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Detect source columns")
+        contract_col = find_matching_column(df.columns, ["Policy No", "Policy Number"])
+        total_commission_col = find_matching_column(df.columns, ["Commission incl Vat", "Commission"])
+        full_name_col = find_matching_column(df.columns, ["unnamed_15"], allow_contains=False)
+        first_name_col = find_matching_column(df.columns, ["Name"])
+        surname_col = find_matching_column(df.columns, ["Surname"])
+
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   full_name_col         : {full_name_col}")
+        print(f"   first_name_col        : {first_name_col}")
+        print(f"   surname_col           : {surname_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Turnberry columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 4: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if full_name_col is not None:
+            normalized_df["client_name"] = df[full_name_col].apply(normalize_text_preserve_case)
+        elif first_name_col and surname_col:
+            normalized_df["client_name"] = (
+                df[first_name_col].apply(normalize_text_preserve_case)
+                + " "
+                + df[surname_col].apply(normalize_text_preserve_case)
+            ).str.replace(r"\s+", " ", regex=True).str.strip()
+        else:
+            normalized_df["client_name"] = ""
+
+        normalized_df["product_house"] = "turnberry"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df[contract_col].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df[total_commission_col])
+        normalized_df["planner"] = planner_value
+
+        print(f"   normalized_df shape before filters: {normalized_df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 5: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Turnberry rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 6: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 6: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Turnberry normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_turnberry_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 5.4.6 Reader: Santam
+# ---------------------------------------------------------------------------
+@register_reader("Santam")
+def read_santam_df(file_path, **kwargs):
+    """
+    Reader for Santam commission statement files.
+
+    Expected source layout from the uploaded sample:
+    - first sheet has no usable header row
+    - each row is a raw fixed-position record
+    - contract number sits in column E
+    - client name sits in column G
+    - net commission sits in column M (negative in the sample)
+
+    Planner currently defaults to UNIFY (PTY) LTD because the uploaded raw
+    sample did not contain a readable planner-name field.
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.6 Reader: read_santam_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read raw first sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read raw first sheet")
+        df = read_raw_first_sheet(file_path, header=None)
+        print(f"   raw shape: {df.shape}")
+
+        if df is None or df.empty:
+            print("🔴 Raw Santam sheet returned no data.")
+            return None
+
+        if df.shape[1] < 13:
+            print("🔴 Santam raw layout does not contain the expected 13 columns.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Build normalized output df from fixed positions
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Build normalized output df from fixed positions")
+        normalized_df = pd.DataFrame()
+        normalized_df["client_name"] = df.iloc[:, 6].apply(normalize_text_preserve_case)
+        normalized_df["product_house"] = "santam"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df.iloc[:, 4].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df.iloc[:, 12]).abs()
+        normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        print(f"   normalized_df shape before filters: {normalized_df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 3: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Santam rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 4: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Santam normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_santam_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 5.4.7 Reader: Sanlam
+# ---------------------------------------------------------------------------
+@register_reader("Sanlam")
+def read_sanlam_df(file_path, **kwargs):
+    """
+    Fallback reader for Sanlam files based on the uploaded example.
+
+    Important:
+    - the uploaded Sanlam reference workbook only contained an already-
+      normalized processed_data-style sheet
+    - because of that, this reader currently re-imports a normalized sheet
+      rather than parsing a raw Sanlam statement layout
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.7 Reader: read_sanlam_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read best matching normalized sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read best matching normalized sheet")
+        source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+            file_path=file_path,
+            required_column_candidates=[
+                ["Client Name"],
+                ["Contract Number"],
+                ["Total Commission"],
+                ["Planner"],
+            ],
+            header=0,
+            exclude_sheet_names=[],
+        )
+
+        print(f"   source_sheet_name: {source_sheet_name}")
+        print(f"   raw shape: {df.shape if isinstance(df, pd.DataFrame) else None}")
+
+        if df is None or df.empty:
+            print("🔴 No usable Sanlam sheet could be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Detect source columns")
+        client_name_col = find_matching_column(df.columns, ["Client Name"])
+        contract_col = find_matching_column(df.columns, ["Contract Number"])
+        total_commission_col = find_matching_column(df.columns, ["Total Commission"])
+        planner_col = find_matching_column(df.columns, ["Planner"])
+
+        print(f"   client_name_col       : {client_name_col}")
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   planner_col           : {planner_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Sanlam columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if client_name_col:
+            normalized_df["client_name"] = df[client_name_col].apply(normalize_text_preserve_case)
+        else:
+            normalized_df["client_name"] = ""
+
+        normalized_df["product_house"] = "sanlam"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df[contract_col].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df[total_commission_col])
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        # -------------------------------------------------------------------
+        # Step 4: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Sanlam rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Sanlam normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_sanlam_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 5.4.8 Reader: Sirago
+# ---------------------------------------------------------------------------
+@register_reader("Sirago")
+def read_sirago_df(file_path, **kwargs):
+    """
+    Fallback reader for Sirago files based on the uploaded example.
+
+    Important:
+    - the uploaded Sirago reference workbook only contained an already-
+      normalized processed_data-style sheet
+    - because of that, this reader currently re-imports a normalized sheet
+      rather than parsing a raw Sirago statement layout
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.8 Reader: read_sirago_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read best matching normalized sheet
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read best matching normalized sheet")
+        source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+            file_path=file_path,
+            required_column_candidates=[
+                ["Client Name"],
+                ["Contract Number"],
+                ["Total Commission"],
+                ["Planner"],
+            ],
+            header=0,
+            exclude_sheet_names=[],
+        )
+
+        print(f"   source_sheet_name: {source_sheet_name}")
+        print(f"   raw shape: {df.shape if isinstance(df, pd.DataFrame) else None}")
+
+        if df is None or df.empty:
+            print("🔴 No usable Sirago sheet could be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Detect source columns")
+        client_name_col = find_matching_column(df.columns, ["Client Name"])
+        contract_col = find_matching_column(df.columns, ["Contract Number"])
+        total_commission_col = find_matching_column(df.columns, ["Total Commission"])
+        planner_col = find_matching_column(df.columns, ["Planner"])
+
+        print(f"   client_name_col       : {client_name_col}")
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   planner_col           : {planner_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Sirago columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if client_name_col:
+            normalized_df["client_name"] = df[client_name_col].apply(normalize_text_preserve_case)
+        else:
+            normalized_df["client_name"] = ""
+
+        normalized_df["product_house"] = "sirago"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = df[contract_col].apply(normalize_text_preserve_case)
+        normalized_df["total_commission"] = coerce_series_to_numeric(df[total_commission_col])
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        # -------------------------------------------------------------------
+        # Step 4: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Sirago rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Sirago normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_sirago_df: {e}")
+        print(traceback.format_exc())
+        return None
 
 
 

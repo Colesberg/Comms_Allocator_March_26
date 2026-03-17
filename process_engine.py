@@ -1,3 +1,7 @@
+# ---------------------------------------------------------------------------
+# Imports
+# ---------------------------------------------------------------------------
+import fitz  # PyMuPDF
 import os
 import re
 import traceback
@@ -383,6 +387,48 @@ def read_best_matching_sheet_by_required_columns(
         return None, None
 
 # ---------------------------------------------------------------------------
+# 1.3.3 Utility: Read Raw PDF Text Lines
+# ---------------------------------------------------------------------------
+def read_raw_pdf_text_lines(file_path):
+    """
+    Read a PDF file and return a cleaned list of text lines.
+
+    Purpose:
+    - extract text page by page
+    - remove blank lines
+    - preserve visible casing
+    - keep line order exactly as it appears in the PDF
+    """
+    try:
+        print(f"   [UTILITY] Reading raw PDF text lines: {file_path}")
+
+        pdf_doc = fitz.open(file_path)
+        pdf_lines = []
+
+        for page_idx in range(len(pdf_doc)):
+            page = pdf_doc.load_page(page_idx)
+            page_text = page.get_text("text")
+
+            page_lines = [
+                str(line).replace("\xa0", " ").strip()
+                for line in page_text.splitlines()
+            ]
+            page_lines = [line for line in page_lines if str(line).strip() != ""]
+
+            print(f"   [UTILITY] Page {page_idx + 1} extracted lines: {len(page_lines)}")
+            pdf_lines.extend(page_lines)
+
+        pdf_doc.close()
+
+        print(f"   [UTILITY] Total PDF lines extracted: {len(pdf_lines)}")
+        return pdf_lines
+
+    except Exception as e:
+        print(f"🔴 Error in read_raw_pdf_text_lines: {e}")
+        print(traceback.format_exc())
+        return []
+
+# ---------------------------------------------------------------------------
 # 1.4 Reader Registry Utilities
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -645,7 +691,7 @@ class FileFolderPickerWidget(QDialog):
                 self,
                 "Select File",
                 "",
-                "Excel Files (*.xlsx *.xls *.xlsm)"
+                "Supported Files (*.xlsx *.xls *.xlsm *.pdf)"
             )
             if file_path:
                 self.selected_path = file_path
@@ -682,11 +728,12 @@ class CommTypeSelectionWidget(QDialog):
             "Dischealth_Silk", "Disclife", "Disclife_Silk", "Discinsure",
             "Discinsure_Silk", "Discgap", "Discgap_Silk", "Guardrisk", "HIC",
             "Hollard_Life", "Hollard_ST", "Liberty", "Kaelo", "Momentum_Mandy",
-            "Momentum_MFP", "MUA", "Nedgroup", "Old_Mutual_Short_Term",
-            "Old_Mutual_Life_Invest", "Sanlam", "Santam", "SAU", "Sirago",
-            "Sirago_Silk", "Stanlib", "Stratum", "Stratum_Silk", "Turnberry",
-            "Zestlife"
+            "Momentum_Mandy_PDF", "Momentum_MFP", "MUA", "Nedgroup",
+            "Old_Mutual_Short_Term", "Old_Mutual_Life_Invest", "Sanlam", "Santam",
+            "SAU", "Sirago", "Sirago_Silk", "Stanlib", "Stratum", "Stratum_Silk",
+            "Turnberry", "Zestlife"
         ]
+
 
         self.setWindowTitle("Select Commission Type")
         self.resize(500, 180)
@@ -943,6 +990,9 @@ def f4_1_1_detect_comm_type_label(file_path):
         "hollard_st": "Hollard_ST",
         "liberty": "Liberty",
         "kaelo": "Kaelo",
+        "momentum_mandy_pdf": "Momentum_Mandy_PDF",
+        "momentum_silkfin": "Momentum_Mandy_PDF",
+        "silkfin": "Momentum_Mandy_PDF",
         "momentum_mandy": "Momentum_Mandy",
         "momentum_mfp": "Momentum_MFP",
         "mua": "MUA",
@@ -1310,22 +1360,6 @@ def read_agbus_df(file_path, **kwargs):
 # 5.1.2 Function: Write Official DF To Selected File / processed_data Sheet
 # ---------------------------------------------------------------------------
 def f5_1_2_write_official_df_to_selected_file(file_path, df):
-    """
-    Official version write logic.
-
-    Purpose:
-    - Open the selected commission workbook file
-    - Create or re-use a sheet called 'processed_data'
-    - Clear the old contents
-    - Write the processed / normalized DF to that sheet
-    - Save and close the selected workbook
-
-    Notes:
-    - Does NOT change DF logic
-    - Does NOT write to Comm_Tables
-    - Writes headers
-    - Does NOT write index column
-    """
     try:
         print("------------------------------------------------------------")
         print("🟦 5.1.2 Write Official DF To Selected File")
@@ -1335,22 +1369,35 @@ def f5_1_2_write_official_df_to_selected_file(file_path, df):
             print("🟠 DF is empty or invalid. Nothing to write.")
             return "no_data"
 
-        print(f"   df shape: {df.shape}")
-        print(f"   df columns: {list(df.columns)}")
+        file_ext = os.path.splitext(file_path)[1].lower()
+        print(f"   file_ext: {file_ext}")
 
-        # -------------------------------------------------------------------
-        # Step 1: Open selected workbook
-        # -------------------------------------------------------------------
-        print("🟦 Step 1: Open selected workbook")
-        target_wb = xw.Book(file_path)
-        print(f"   opened workbook: {target_wb.name}")
+        # ---------------------------------------------------------------
+        # Step 1: Excel source files -> existing logic
+        # ---------------------------------------------------------------
+        if file_ext in [".xlsx", ".xls", ".xlsm"]:
+            print("🟦 Step 1: Open selected Excel workbook")
+            target_wb = xw.Book(file_path)
 
-        # -------------------------------------------------------------------
-        # Step 2: Get or create processed_data sheet
-        # -------------------------------------------------------------------
-        print("🟦 Step 2: Get or create 'processed_data' sheet")
+        # ---------------------------------------------------------------
+        # Step 2: PDF source files -> create companion output workbook
+        # ---------------------------------------------------------------
+        elif file_ext == ".pdf":
+            print("🟦 Step 1: Source is PDF, create companion processed workbook")
+            output_file_path = os.path.splitext(file_path)[0] + "_processed.xlsx"
+            print(f"   output_file_path: {output_file_path}")
+
+            target_wb = xw.Book()
+            target_wb.save(output_file_path)
+
+        else:
+            print(f"🔴 Unsupported file extension for official write: {file_ext}")
+            return "failed"
+
+        # ---------------------------------------------------------------
+        # Step 3: Get or create processed_data sheet
+        # ---------------------------------------------------------------
         processed_sheet_name = "processed_data"
-
         existing_sheet_names = [s.name.lower() for s in target_wb.sheets]
 
         if processed_sheet_name.lower() in existing_sheet_names:
@@ -1359,33 +1406,23 @@ def f5_1_2_write_official_df_to_selected_file(file_path, df):
                 if s.name.strip().lower() == processed_sheet_name.lower():
                     sh_processed_data = s
                     break
-            print(f"   existing sheet found: {sh_processed_data.name}")
         else:
             sh_processed_data = target_wb.sheets.add(processed_sheet_name)
-            print(f"   created new sheet: {sh_processed_data.name}")
 
-        # -------------------------------------------------------------------
-        # Step 3: Clear old contents
-        # -------------------------------------------------------------------
-        print("🟦 Step 3: Clear old contents on processed_data")
+        # ---------------------------------------------------------------
+        # Step 4: Clear and write
+        # ---------------------------------------------------------------
         sh_processed_data.range("A1:ZZ4000").clear_contents()
-
-        # -------------------------------------------------------------------
-        # Step 4: Write DF
-        # -------------------------------------------------------------------
-        print("🟦 Step 4: Write DF to processed_data!A1")
         sh_processed_data.range("A1").options(index=False, header=True).value = df
 
         try:
             sh_processed_data.autofit()
-            print("   autofit applied")
         except Exception as autofit_error:
             print(f"   ⚠️ Autofit skipped: {autofit_error}")
 
-        # -------------------------------------------------------------------
-        # Step 5: Save and close workbook
-        # -------------------------------------------------------------------
-        print("🟦 Step 5: Save and close selected workbook")
+        # ---------------------------------------------------------------
+        # Step 5: Save and close
+        # ---------------------------------------------------------------
         target_wb.save()
         target_wb.close()
 
@@ -3434,12 +3471,953 @@ def read_bonitas_df(file_path, **kwargs):
         return None
     
 # ---------------------------------------------------------------------------
+# 5.2.5 Reader: Hollard Life
+# ---------------------------------------------------------------------------
+@register_reader("Hollard_Life")
+def read_hollard_life_df(file_path, **kwargs):
+    """
+    Reader for Hollard Life commission statement files.
+
+    Goal:
+    - read the raw Hollard Life sheet correctly
+    - normalize the source headers
+    - clean the raw data
+    - detect the main source columns robustly
+    - map the source columns into the normalized structure
+
+    Returns normalized columns:
+    - client_name
+    - product_house
+    - commission_month
+    - contract_number
+    - total_commission
+    - planner
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.2.x Reader: read_hollard_life_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read raw first sheet with header row
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read raw first sheet with header row")
+        df = read_raw_first_sheet(file_path, header=0)
+        print(f"   raw shape: {df.shape}")
+        print(f"   raw columns before normalization: {list(df.columns)}")
+
+        if df is None or df.empty:
+            print("🔴 Raw Hollard Life sheet returned no data.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Normalize column headers
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Normalize column headers")
+        df = normalize_column_headers(df)
+        print(f"   normalized columns: {list(df.columns)}")
+
+        # -------------------------------------------------------------------
+        # Step 3: Drop fully blank rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Drop fully blank rows")
+        df = drop_fully_blank_rows(df)
+        print(f"   shape after blank-row cleanup: {df.shape}")
+
+        if df.empty:
+            print("🔴 No usable Hollard Life rows remain after blank-row cleanup.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 4: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Detect source columns")
+
+        client_name_col = find_matching_column(
+            df.columns,
+            ["Policyholder", "Policy Holder", "Client Name", "Client"]
+        )
+        contract_col = find_matching_column(
+            df.columns,
+            ["Policy no.", "Policy no", "Policy Number", "Policy Number"]
+        )
+        total_commission_col = find_matching_column(
+            df.columns,
+            ["Amount", "Commission", "Commission Amount"]
+        )
+        planner_col = find_matching_column(
+            df.columns,
+            ["Intermediary", "Broker", "Planner"]
+        )
+
+        print(f"   client_name_col       : {client_name_col}")
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   planner_col           : {planner_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Hollard Life columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if client_name_col:
+            normalized_df["client_name"] = (
+                df[client_name_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "tbc")
+            )
+        else:
+            normalized_df["client_name"] = "tbc"
+
+        normalized_df["contract_number"] = (
+            df[contract_col]
+            .apply(normalize_text_preserve_case)
+        )
+
+        normalized_df["total_commission"] = coerce_series_to_numeric(
+            df[total_commission_col]
+        )
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        normalized_df["product_house"] = "hollard_life"
+        normalized_df["commission_month"] = comm_month
+
+        # -------------------------------------------------------------------
+        # Step 6: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 6: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Hollard Life rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 7: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 7: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Hollard Life normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_hollard_life_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+# ---------------------------------------------------------------------------
+# 5.2.6 Reader: Liberty
+# ---------------------------------------------------------------------------
+@register_reader("Liberty")
+def read_liberty_df(file_path, **kwargs):
+    """
+    Reader for Liberty commission statement files.
+
+    Goal:
+    - read the raw Liberty sheet correctly
+    - normalize the source headers
+    - clean the raw data
+    - detect the main source columns robustly
+    - map the source columns into the normalized structure
+
+    Returns normalized columns:
+    - client_name
+    - product_house
+    - commission_month
+    - contract_number
+    - total_commission
+    - planner
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.2.x Reader: read_liberty_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read raw first sheet with header row
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read raw first sheet with header row")
+        df = read_raw_first_sheet(file_path, header=0)
+        print(f"   raw shape: {df.shape}")
+        print(f"   raw columns before normalization: {list(df.columns)}")
+
+        if df is None or df.empty:
+            print("🔴 Raw Liberty sheet returned no data.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Normalize column headers
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Normalize column headers")
+        df = normalize_column_headers(df)
+        print(f"   normalized columns: {list(df.columns)}")
+
+        # -------------------------------------------------------------------
+        # Step 3: Drop fully blank rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Drop fully blank rows")
+        df = drop_fully_blank_rows(df)
+        print(f"   shape after blank-row cleanup: {df.shape}")
+
+        if df.empty:
+            print("🔴 No usable Liberty rows remain after blank-row cleanup.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 4: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Detect source columns")
+
+        client_name_col = find_matching_column(
+            df.columns,
+            ["Life Assured", "Client Name", "Client", "Policyholder"]
+        )
+        contract_col = find_matching_column(
+            df.columns,
+            ["Contract", "Contract Number", "Policy Number"]
+        )
+        total_commission_col = find_matching_column(
+            df.columns,
+            ["Amount", "Commission", "Commission Amount"]
+        )
+        planner_col = find_matching_column(
+            df.columns,
+            ["Planner", "Intermediary", "Broker"]
+        )
+
+        print(f"   client_name_col       : {client_name_col}")
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   planner_col           : {planner_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Liberty columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 5: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if client_name_col:
+            normalized_df["client_name"] = (
+                df[client_name_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "tbc")
+            )
+        else:
+            normalized_df["client_name"] = "tbc"
+
+        normalized_df["contract_number"] = (
+            df[contract_col]
+            .apply(normalize_text_preserve_case)
+        )
+
+        normalized_df["total_commission"] = coerce_series_to_numeric(
+            df[total_commission_col]
+        )
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "Unify")
+            )
+        else:
+            normalized_df["planner"] = "Unify"
+
+        normalized_df["product_house"] = "liberty"
+        normalized_df["commission_month"] = comm_month
+
+        # -------------------------------------------------------------------
+        # Step 6: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 6: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Liberty rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 7: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 7: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Liberty normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_liberty_df: {e}")
+        print(traceback.format_exc())
+        return None
+
+# ---------------------------------------------------------------------------
+# 5.1.7 Reader: Momentum Mandy
+# ---------------------------------------------------------------------------
+@register_reader("Momentum_Mandy")
+def read_momentum_mandy_df(file_path, **kwargs):
+    """
+    Reader for Momentum Mandy commission statement files.
+
+    Goal:
+    - read the raw Momentum sheet correctly
+    - identify the true header row
+    - clean the raw data
+    - map the source columns into a normalized structure
+
+    Returns normalized columns:
+    - client_name
+    - product_house
+    - commission_month
+    - contract_number
+    - total_commission
+    - planner
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.1.x Reader: read_momentum_mandy_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read raw first sheet
+        # NOTE:
+        # Momentum sample is .xls, so read explicitly with xlrd engine.
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read raw first sheet")
+        df = pd.read_excel(file_path, sheet_name=0, header=None, engine="xlrd")
+        print(f"   raw shape: {df.shape}")
+
+        if df is None or df.empty:
+            print("🔴 Raw Momentum Mandy sheet returned no data.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Find the header row
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Find 'Product house' row")
+        header_row_idx = find_row_index_by_first_column_value(df, "Product house")
+        print(f"   header_row_idx: {header_row_idx}")
+
+        if header_row_idx is None:
+            print("🔴 'Product house' row not found.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 3: Set header from target row
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Set header from target row")
+        df = set_header_from_row(df, header_row_idx)
+        print(f"   shape after header set: {df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 4: Normalize headers
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Normalize column headers")
+        df = normalize_column_headers(df)
+        print(f"   columns after normalization: {list(df.columns)}")
+
+        # -------------------------------------------------------------------
+        # Step 5: Drop likely blank rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Drop likely blank rows")
+        df = drop_blank_rows_by_column_position(df, 1)
+        df = drop_fully_blank_rows(df)
+        print(f"   shape after blank-row cleanup: {df.shape}")
+
+        if df.empty:
+            print("🔴 No usable Momentum Mandy rows remain after blank-row cleanup.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 6: Detect source columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 6: Detect source columns")
+
+        client_name_col = find_matching_column(
+            df.columns,
+            ["Client", "Client Name"]
+        )
+        contract_col = find_matching_column(
+            df.columns,
+            ["Contract number", "Contract Number", "Contract"]
+        )
+        total_commission_col = find_matching_column(
+            df.columns,
+            ["Grand Total", "Total", "Commission Total"]
+        )
+        planner_col = find_matching_column(
+            df.columns,
+            ["Planner", "Broker", "Intermediary"]
+        )
+
+        print(f"   client_name_col       : {client_name_col}")
+        print(f"   contract_col          : {contract_col}")
+        print(f"   total_commission_col  : {total_commission_col}")
+        print(f"   planner_col           : {planner_col}")
+
+        if contract_col is None or total_commission_col is None:
+            print("🔴 Required Momentum Mandy columns could not be identified.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 7: Build normalized output df
+        # -------------------------------------------------------------------
+        print("🟦 Step 7: Build normalized output df")
+        normalized_df = pd.DataFrame()
+
+        if client_name_col:
+            normalized_df["client_name"] = (
+                df[client_name_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "tbc")
+            )
+        else:
+            normalized_df["client_name"] = "tbc"
+
+        normalized_df["contract_number"] = (
+            df[contract_col]
+            .apply(normalize_text_preserve_case)
+        )
+
+        normalized_df["total_commission"] = coerce_series_to_numeric(
+            df[total_commission_col]
+        )
+
+        if planner_col:
+            normalized_df["planner"] = (
+                df[planner_col]
+                .apply(normalize_text_preserve_case)
+                .replace("", "UNIFY (PTY) LTD")
+            )
+        else:
+            normalized_df["planner"] = "UNIFY (PTY) LTD"
+
+        normalized_df["product_house"] = "momentum_mandy"
+        normalized_df["commission_month"] = comm_month
+
+        print(f"   normalized_df shape before row filters: {normalized_df.shape}")
+
+        # -------------------------------------------------------------------
+        # Step 8: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 8: Filter invalid rows")
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["client_name"].apply(lambda x: normalize_text(x) != "total")
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Momentum Mandy rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 9: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 9: Reorder final columns")
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Momentum Mandy normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_momentum_mandy_df: {e}")
+        print(traceback.format_exc())
+        return None
+    
+# ---------------------------------------------------------------------------
 # 5.3 Range-Based / Openpyxl Reader Functions
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # 5.4 Special-Layout Reader Functions
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 5.4.1 Reader: Momentum_Mandy_PDF
+# ---------------------------------------------------------------------------
+@register_reader("Momentum_Mandy_PDF")
+def read_momentum_mandy_pdf_df(file_path, **kwargs):
+    """
+    Reader for Momentum Mandy PDF commission statements.
+
+    Expected PDF structure:
+    - first page contains statement metadata
+    - each data row is rendered vertically as:
+        contract number
+        client
+        broker
+        broker code
+        commission
+    - section headings define the current product / payment context
+    - some sections continue across pages without repeating headings
+
+    Returns normalized columns:
+    - client_name
+    - product_house
+    - commission_month
+    - contract_number
+    - total_commission
+    - planner
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.1 Reader: read_momentum_mandy_pdf_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Read raw PDF text lines
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Read raw PDF text lines")
+        pdf_lines = read_raw_pdf_text_lines(file_path)
+        print(f"   extracted line count: {len(pdf_lines)}")
+
+        if not pdf_lines:
+            print("🔴 No PDF text lines were extracted.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 2: Define heading and pattern logic
+        # -------------------------------------------------------------------
+        print("🟦 Step 2: Define heading and pattern logic")
+
+        product_house_map = {
+            "Investo": "investo",
+            "Momentum Health": "momentum_health",
+            "Momentum Short-Term": "momentum_short_term",
+            "Momentum Wealth": "momentum_wealth",
+            "Myriad": "myriad",
+        }
+
+        section_level_1_values = {
+            "As And When",
+            "Ongoing",
+            "Upfront",
+        }
+
+        section_level_2_values = {
+            "Premium received",
+            "Trail Commission",
+            "Alteration",
+            "Payment",
+            "Unpaid",
+            "Advisory Fee",
+            "Renewal",
+            "CPI",
+        }
+
+        header_lines_to_skip = {
+            "Contract number",
+            "Client",
+            "Broker",
+            "Broker Code",
+            "Commission & Fees",
+        }
+
+        contract_pattern = re.compile(r"^(?:(?:[A-Z]{1,3}|\d{1,3})\s+)?\d{5,12}$")
+        broker_code_pattern = re.compile(r"^\d{6}$")
+        amount_pattern = re.compile(r"^-?R[\d,]+\.\d{2}$")
+        subtotal_pattern = re.compile(r"^(.+?)\s+SubTotal$", re.IGNORECASE)
+
+        # -------------------------------------------------------------------
+        # Step 3: Parse metadata and transactional rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 3: Parse PDF line structure")
+
+        broker_from_header = None
+        broker_code_from_header = None
+
+        parsed_rows = []
+        parsed_subtotals = {}
+        parsed_month_total = None
+        parsed_total = None
+
+        current_product_house = None
+        current_section_level_1 = None
+        current_section_level_2 = None
+
+        i = 0
+        while i < len(pdf_lines):
+            line = str(pdf_lines[i]).strip()
+
+            if line == "":
+                i += 1
+                continue
+
+            # ---------------------------------------------------------------
+            # Step 3.1: Header metadata
+            # ---------------------------------------------------------------
+            if line == "Broker:" and i + 1 < len(pdf_lines):
+                broker_from_header = str(pdf_lines[i + 1]).strip()
+                print(f"   broker_from_header: {broker_from_header}")
+                i += 2
+                continue
+
+            if line == "Broker code:" and i + 1 < len(pdf_lines):
+                broker_code_from_header = str(pdf_lines[i + 1]).strip()
+                print(f"   broker_code_from_header: {broker_code_from_header}")
+                i += 2
+                continue
+
+            # ---------------------------------------------------------------
+            # Step 3.2: Footer / noise lines
+            # ---------------------------------------------------------------
+            if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2},.*", line):
+                i += 1
+                continue
+
+            if re.fullmatch(r"\d+/\d+", line):
+                i += 1
+                continue
+
+            if line.startswith("http://") or line.startswith("https://"):
+                i += 1
+                continue
+
+            if line in {
+                "Production statement",
+                "Production statement:",
+                "Financial month:",
+                "Broker house:",
+                "Broker house code:",
+            }:
+                i += 1
+                continue
+
+            if line.startswith("Broker house code:"):
+                i += 1
+                continue
+
+            if line.startswith("January") and "broker house code" in line:
+                i += 1
+                continue
+
+            if line in {"January 2026", "HOWARD JOHN CHARLES SILK"}:
+                i += 1
+                continue
+
+            # ---------------------------------------------------------------
+            # Step 3.3: Structural headings
+            # ---------------------------------------------------------------
+            if line in product_house_map:
+                current_product_house = product_house_map[line]
+                print(f"   current_product_house set to: {current_product_house}")
+                i += 1
+                continue
+
+            if line in section_level_1_values:
+                current_section_level_1 = line
+                i += 1
+                continue
+
+            if line in section_level_2_values:
+                current_section_level_2 = line
+                i += 1
+                continue
+
+            if line in header_lines_to_skip:
+                i += 1
+                continue
+
+            # ---------------------------------------------------------------
+            # Step 3.4: Section subtotals
+            # ---------------------------------------------------------------
+            subtotal_match = subtotal_pattern.match(line)
+            if subtotal_match:
+                subtotal_label = subtotal_match.group(1).strip()
+                next_line = str(pdf_lines[i + 1]).strip() if i + 1 < len(pdf_lines) else ""
+
+                if amount_pattern.match(next_line):
+                    subtotal_value = float(next_line.replace("R", "").replace(",", ""))
+                    parsed_subtotals[subtotal_label] = subtotal_value
+                    print(f"   parsed subtotal -> {subtotal_label}: {subtotal_value}")
+                    i += 2
+                    continue
+
+                i += 1
+                continue
+
+            # ---------------------------------------------------------------
+            # Step 3.5: Statement totals
+            # ---------------------------------------------------------------
+            if line == "Month total":
+                next_line = str(pdf_lines[i + 1]).strip() if i + 1 < len(pdf_lines) else ""
+                if amount_pattern.match(next_line):
+                    parsed_month_total = float(next_line.replace("R", "").replace(",", ""))
+                    print(f"   parsed_month_total: {parsed_month_total}")
+                    i += 2
+                    continue
+
+            if line == "Total":
+                next_line = str(pdf_lines[i + 1]).strip() if i + 1 < len(pdf_lines) else ""
+                if amount_pattern.match(next_line):
+                    parsed_total = float(next_line.replace("R", "").replace(",", ""))
+                    print(f"   parsed_total: {parsed_total}")
+                    i += 2
+                    continue
+
+            # ---------------------------------------------------------------
+            # Step 3.6: Transaction rows
+            # ---------------------------------------------------------------
+            if contract_pattern.match(line) and i + 4 < len(pdf_lines):
+                contract_number = line
+                client_name = str(pdf_lines[i + 1]).strip()
+                planner = str(pdf_lines[i + 2]).strip()
+                broker_code = str(pdf_lines[i + 3]).strip()
+                amount_text = str(pdf_lines[i + 4]).strip()
+
+                if broker_code_pattern.match(broker_code) and amount_pattern.match(amount_text):
+                    total_commission = float(amount_text.replace("R", "").replace(",", ""))
+
+                    parsed_rows.append({
+                        "source_product_house": current_product_house,
+                        "source_section_level_1": current_section_level_1,
+                        "source_section_level_2": current_section_level_2,
+                        "contract_number": contract_number,
+                        "client_name": client_name,
+                        "planner": planner if planner != "" else broker_from_header,
+                        "broker_code": broker_code if broker_code != "" else broker_code_from_header,
+                        "total_commission": total_commission,
+                    })
+
+                    i += 5
+                    continue
+
+            i += 1
+
+        print(f"   parsed transactional rows: {len(parsed_rows)}")
+
+        if len(parsed_rows) == 0:
+            print("🔴 No transaction rows could be parsed from the Momentum PDF.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 4: Convert parsed rows to DataFrame
+        # -------------------------------------------------------------------
+        print("🟦 Step 4: Convert parsed rows to DataFrame")
+        parsed_df = pd.DataFrame(parsed_rows)
+        print(f"   parsed_df shape: {parsed_df.shape}")
+        print(parsed_df.head(10))
+
+        # -------------------------------------------------------------------
+        # Step 5: Validate parsed totals
+        # -------------------------------------------------------------------
+        print("🟦 Step 5: Validate parsed totals against PDF subtotals")
+
+        actual_subtotals = (
+            parsed_df.groupby("source_product_house", dropna=False)["total_commission"]
+            .sum()
+            .round(2)
+            .to_dict()
+        )
+
+        reverse_product_house_map = {v: k for k, v in product_house_map.items()}
+
+        for source_key, actual_total in actual_subtotals.items():
+            display_label = reverse_product_house_map.get(source_key)
+            expected_total = parsed_subtotals.get(display_label)
+
+            print(
+                f"   subtotal check | source_key={source_key} | "
+                f"display_label={display_label} | actual_total={actual_total} | "
+                f"expected_total={expected_total}"
+            )
+
+        parsed_grand_total = round(parsed_df["total_commission"].sum(), 2)
+        print(f"   parsed_grand_total: {parsed_grand_total}")
+        print(f"   PDF month total   : {parsed_month_total}")
+        print(f"   PDF total         : {parsed_total}")
+
+        # -------------------------------------------------------------------
+        # Step 6: Build normalized output DataFrame
+        # -------------------------------------------------------------------
+        print("🟦 Step 6: Build normalized output DataFrame")
+
+        normalized_df = pd.DataFrame()
+        normalized_df["client_name"] = parsed_df["client_name"].astype(str).str.strip()
+        normalized_df["product_house"] = "momentum_mandy"
+        normalized_df["commission_month"] = comm_month
+        normalized_df["contract_number"] = parsed_df["contract_number"].astype(str).str.strip()
+        normalized_df["total_commission"] = pd.to_numeric(parsed_df["total_commission"], errors="coerce")
+        normalized_df["planner"] = parsed_df["planner"].fillna("").astype(str).str.strip().replace("", broker_from_header if broker_from_header else "tbc")
+
+        print(f"   normalized_df shape before filters: {normalized_df.shape}")
+        print(normalized_df.head(10))
+
+        # -------------------------------------------------------------------
+        # Step 7: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 7: Filter invalid rows")
+
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].astype(str).str.strip() != ""
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Momentum Mandy PDF rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 8: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 8: Reorder final columns")
+
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Momentum Mandy PDF normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_momentum_mandy_pdf_df: {e}")
+        print(traceback.format_exc())
+        return None
+
 
 
 

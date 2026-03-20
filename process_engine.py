@@ -7,6 +7,8 @@ import re
 import traceback
 import pandas as pd
 import xlwings as xw
+import pytesseract
+from PIL import Image
 import xml.etree.ElementTree as ET
 
 from PyQt5.QtWidgets import (
@@ -522,6 +524,112 @@ def read_raw_pdf_text_lines(file_path):
         print(f"🔴 Error in read_raw_pdf_text_lines: {e}")
         print(traceback.format_exc())
         return []
+
+
+# ---------------------------------------------------------------------------
+# 1.3.4 Utility: Read Raw PDF Text Lines With OCR Fallback
+# ---------------------------------------------------------------------------
+def read_raw_pdf_text_lines_with_ocr_fallback(file_path, force_ocr=False, zoom=2.0):
+    """
+    Read a PDF file and return cleaned text lines.
+
+    Logic:
+    - first try the existing text-based PDF extraction
+    - if no text is found (or force_ocr=True), render each page to an image
+      and use OCR to extract lines
+    """
+    try:
+        if not force_ocr:
+            pdf_lines = read_raw_pdf_text_lines(file_path)
+            if pdf_lines:
+                return pdf_lines
+
+        print(f"   [UTILITY] OCR fallback PDF read: {file_path}")
+
+        pdf_doc = fitz.open(file_path)
+        pdf_lines = []
+
+        for page_idx in range(len(pdf_doc)):
+            page = pdf_doc.load_page(page_idx)
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            page_text = pytesseract.image_to_string(
+                img,
+                config="--psm 6"
+            )
+
+            page_lines = [
+                normalize_text_preserve_case(line)
+                for line in str(page_text).splitlines()
+            ]
+            page_lines = [
+                line for line in page_lines
+                if normalize_text(line) != ""
+            ]
+
+            print(f"   [UTILITY] OCR Page {page_idx + 1} extracted lines: {len(page_lines)}")
+            pdf_lines.extend(page_lines)
+
+        pdf_doc.close()
+
+        print(f"   [UTILITY] OCR Total PDF lines extracted: {len(pdf_lines)}")
+        return pdf_lines
+
+    except Exception as e:
+        print(f"🔴 Error in read_raw_pdf_text_lines_with_ocr_fallback: {e}")
+        print(traceback.format_exc())
+        return []
+
+# ---------------------------------------------------------------------------
+# 1.3.5 Utility: Get Next Available Versioned File Path
+# ---------------------------------------------------------------------------
+def get_next_available_versioned_file_path(target_file_path):
+    """
+    Return a safe file path that does not already exist.
+
+    Logic:
+    - if the requested path does not exist, return it unchanged
+    - if it already exists, add _vs_2 before the extension
+    - if that also exists, try _vs_3, _vs_4, etc.
+
+    Example:
+    - statement.xlsx      -> statement.xlsx      (if free)
+    - statement.xlsx      -> statement_vs_2.xlsx (if statement.xlsx exists)
+    - statement.xlsx      -> statement_vs_3.xlsx (if _vs_2 also exists)
+    """
+    try:
+        print("   [UTILITY] Get next available versioned file path")
+        print(f"   [UTILITY] requested target_file_path: {target_file_path}")
+
+        target_file_path = str(target_file_path)
+        folder_path = os.path.dirname(target_file_path)
+        file_name = os.path.basename(target_file_path)
+        file_base, file_ext = os.path.splitext(file_name)
+
+        if not os.path.exists(target_file_path):
+            print("   [UTILITY] Base path does not exist. Using base path.")
+            return target_file_path
+
+        version_no = 2
+
+        while True:
+            candidate_name = f"{file_base}_vs_{version_no}{file_ext}"
+            candidate_path = os.path.join(folder_path, candidate_name)
+            print(f"   [UTILITY] Checking candidate_path: {candidate_path}")
+
+            if not os.path.exists(candidate_path):
+                print(f"   [UTILITY] Using candidate_path: {candidate_path}")
+                return candidate_path
+
+            version_no += 1
+
+    except Exception as e:
+        print(f"   [UTILITY] Error while generating versioned file path: {e}")
+        print(traceback.format_exc())
+        return str(target_file_path)
 
 # ---------------------------------------------------------------------------
 # 1.4 Reader Registry Utilities
@@ -1454,7 +1562,33 @@ def read_agbus_df(file_path, **kwargs):
 # ---------------------------------------------------------------------------
 # 5.1.2 Function: Write Official DF To Selected File / processed_data Sheet
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 5.1.2 Function: Write Official DF To Selected File / processed_data Sheet
+# ---------------------------------------------------------------------------
 def f5_1_2_write_official_df_to_selected_file(file_path, df):
+    """
+    Official write helper.
+
+    Logic:
+    - If the selected source is an Excel workbook:
+        write the processed df into that same workbook on a sheet called
+        'processed_data'
+    - If the selected source is a PDF:
+        create a companion Excel workbook using the same base filename as the PDF
+        and write the processed df into a sheet called 'processed_data'
+
+    PDF versioning logic:
+    - first try: same_name.xlsx
+    - if that exists: same_name_vs_2.xlsx
+    - then same_name_vs_3.xlsx
+    - etc.
+    """
+    app = None
+    target_wb = None
+    target_file_path = None
+    opened_here = False
+    created_hidden_app = False
+
     try:
         print("------------------------------------------------------------")
         print("🟦 5.1.2 Write Official DF To Selected File")
@@ -1464,62 +1598,142 @@ def f5_1_2_write_official_df_to_selected_file(file_path, df):
             print("🟠 DF is empty or invalid. Nothing to write.")
             return "no_data"
 
-        file_ext = os.path.splitext(file_path)[1].lower()
-        print(f"   file_ext: {file_ext}")
+        source_file_path = os.path.abspath(str(file_path))
+        file_ext = os.path.splitext(source_file_path)[1].lower()
+
+        print(f"   source_file_path: {source_file_path}")
+        print(f"   file_ext        : {file_ext}")
 
         # ---------------------------------------------------------------
-        # Step 1: Excel source files -> existing logic
+        # Step 1: Determine target file path
         # ---------------------------------------------------------------
+        print("🟦 Step 1: Determine target file path")
+
         if file_ext in [".xlsx", ".xls", ".xlsm"]:
-            print("🟦 Step 1: Open selected Excel workbook")
-            target_wb = xw.Book(file_path)
+            target_file_path = source_file_path
+            print("   Excel source detected")
+            print(f"   target_file_path: {target_file_path}")
 
-        # ---------------------------------------------------------------
-        # Step 2: PDF source files -> create companion output workbook
-        # ---------------------------------------------------------------
         elif file_ext == ".pdf":
-            print("🟦 Step 1: Source is PDF, create companion processed workbook")
-            output_file_path = os.path.splitext(file_path)[0] + "_processed.xlsx"
-            print(f"   output_file_path: {output_file_path}")
+            print("   PDF source detected")
 
-            target_wb = xw.Book()
-            target_wb.save(output_file_path)
+            base_no_ext = os.path.splitext(source_file_path)[0]
+            first_choice = base_no_ext + ".xlsx"
+
+            if not os.path.exists(first_choice):
+                target_file_path = first_choice
+                print("   First companion workbook name available")
+            else:
+                print("   Base companion workbook already exists, finding next version...")
+                version_no = 2
+                while True:
+                    candidate_path = f"{base_no_ext}_vs_{version_no}.xlsx"
+                    print(f"   Checking candidate: {candidate_path}")
+                    if not os.path.exists(candidate_path):
+                        target_file_path = candidate_path
+                        print(f"   Selected versioned path: {target_file_path}")
+                        break
+                    version_no += 1
 
         else:
             print(f"🔴 Unsupported file extension for official write: {file_ext}")
             return "failed"
 
         # ---------------------------------------------------------------
+        # Step 2: Bind to existing open workbook or open/create target
+        # ---------------------------------------------------------------
+        print("🟦 Step 2: Open or create target workbook")
+
+        if file_ext in [".xlsx", ".xls", ".xlsm"]:
+            # Try first to bind to an already-open workbook
+            for excel_app in xw.apps:
+                for wb in excel_app.books:
+                    try:
+                        wb_fullname = os.path.abspath(str(wb.fullname))
+                        if wb_fullname.lower() == target_file_path.lower():
+                            target_wb = wb
+                            print(f"   Bound to already open workbook: {target_wb.name}")
+                            break
+                    except Exception:
+                        pass
+                if target_wb is not None:
+                    break
+
+            # If not open, open it in a hidden app
+            if target_wb is None:
+                print("   Workbook not already open. Opening in hidden Excel app...")
+                app = xw.App(visible=False, add_book=False)
+                created_hidden_app = True
+                app.display_alerts = False
+                app.screen_updating = False
+
+                target_wb = app.books.open(
+                    target_file_path,
+                    update_links=False,
+                    read_only=False
+                )
+                opened_here = True
+                print(f"   Opened workbook: {target_wb.name}")
+
+        elif file_ext == ".pdf":
+            print("   Creating new companion workbook for PDF...")
+            app = xw.App(visible=False, add_book=False)
+            created_hidden_app = True
+            app.display_alerts = False
+            app.screen_updating = False
+
+            target_wb = app.books.add()
+            opened_here = True
+            print("   New workbook created")
+
+            target_wb.save(target_file_path)
+            print(f"   Companion workbook saved as: {target_file_path}")
+
+        if target_wb is None:
+            print("🔴 Could not open or create target workbook.")
+            return "failed"
+
+        # ---------------------------------------------------------------
         # Step 3: Get or create processed_data sheet
         # ---------------------------------------------------------------
+        print("🟦 Step 3: Get or create processed_data sheet")
+
         processed_sheet_name = "processed_data"
-        existing_sheet_names = [s.name.lower() for s in target_wb.sheets]
+        sh_processed_data = None
 
-        if processed_sheet_name.lower() in existing_sheet_names:
-            sh_processed_data = None
-            for s in target_wb.sheets:
-                if s.name.strip().lower() == processed_sheet_name.lower():
-                    sh_processed_data = s
-                    break
-        else:
+        for sh in target_wb.sheets:
+            if str(sh.name).strip().lower() == processed_sheet_name.lower():
+                sh_processed_data = sh
+                print(f"   Using existing sheet: {sh_processed_data.name}")
+                break
+
+        if sh_processed_data is None:
+            print("   processed_data sheet not found. Creating it...")
             sh_processed_data = target_wb.sheets.add(processed_sheet_name)
+            print(f"   Created sheet: {sh_processed_data.name}")
 
         # ---------------------------------------------------------------
-        # Step 4: Clear and write
+        # Step 4: Clear old data and write new df
         # ---------------------------------------------------------------
-        sh_processed_data.range("A1:ZZ4000").clear_contents()
+        print("🟦 Step 4: Clear old data and write DataFrame")
+        print("   Clearing A1:ZZ5000...")
+        sh_processed_data.range("A1:ZZ5000").clear_contents()
+
+        print("   Writing DataFrame to A1 with headers and no index...")
         sh_processed_data.range("A1").options(index=False, header=True).value = df
 
         try:
             sh_processed_data.autofit()
+            print("   Autofit complete")
         except Exception as autofit_error:
             print(f"   ⚠️ Autofit skipped: {autofit_error}")
 
         # ---------------------------------------------------------------
-        # Step 5: Save and close
+        # Step 5: Save workbook
         # ---------------------------------------------------------------
+        print("🟦 Step 5: Save workbook")
         target_wb.save()
-        target_wb.close()
+        print(f"   Workbook saved: {target_file_path}")
 
         print("✅ Official DF write complete")
         return "success"
@@ -1529,6 +1743,21 @@ def f5_1_2_write_official_df_to_selected_file(file_path, df):
         print(traceback.format_exc())
         return "failed"
 
+    finally:
+        try:
+            if target_wb is not None and opened_here:
+                print("🟦 Finalize: Closing workbook opened by helper")
+                target_wb.close()
+        except Exception as close_error:
+            print(f"⚠️ Error closing workbook: {close_error}")
+
+        try:
+            if app is not None and created_hidden_app:
+                print("🟦 Finalize: Quitting hidden Excel app")
+                app.quit()
+        except Exception as app_error:
+            print(f"⚠️ Error quitting hidden Excel app: {app_error}")
+            
 # ---------------------------------------------------------------------------
 # 5.1.2 Reader: AllanGray_Unify
 # ---------------------------------------------------------------------------
@@ -2892,6 +3121,119 @@ def read_bidvest_df(file_path, **kwargs):
         )
 
         # -------------------------------------------------------------------
+        # Step 0.1: PDF branch
+        # -------------------------------------------------------------------
+        if str(file_path).strip().lower().endswith(".pdf"):
+            print("🟦 Step 0.1: Bidvest PDF branch")
+
+            pdf_lines = read_raw_pdf_text_lines_with_ocr_fallback(file_path)
+            print(f"   extracted pdf line count: {len(pdf_lines)}")
+
+            if not pdf_lines:
+                print("🔴 No PDF text lines were extracted for Bidvest.")
+                return None
+
+            adviser_name = "UNIFY (PTY) LTD"
+            adviser_pattern = re.compile(
+                r"^Adviser Name:\s*(?P<name>.+?)\s+Adviser No:",
+                re.IGNORECASE
+            )
+
+            parsed_rows = []
+
+            row_pattern = re.compile(
+                r"^(?P<contract>\d{6,12})\s+"
+                r"(?P<client>.+?)\s+"
+                r"(?P<commence>\d{2}-[A-Z]{3}-\d{2})\s+"
+                r"(?P<product>.+?)\s+"
+                r"(?P<transaction_type>.+?)\s+"
+                r"(?P<trans_date>\d{2}-[A-Z]{3}-\d{2})\s+"
+                r"(?P<planner>[A-Za-z ,.'\-]+)\s+"
+                r"(?P<commission>-?[\d,]+\.\d{2})\s+"
+                r"(?P<vat>-?[\d,]+\.\d{2})$"
+            )
+
+            skip_starts = (
+                "commission_statement",
+                "adviser commission statement",
+                "period:",
+                "brokerage house:",
+                "adviser name:",
+                "contract type:",
+                "fsp number:",
+                "policy commence transaction commission",
+                "no. policy holder",
+                "commission paid",
+                "batch",
+                "total for batch",
+                "total commission paid",
+                "bidvest life ltd",
+            )
+
+            for line in pdf_lines:
+                line_clean = normalize_text_preserve_case(line)
+
+                adviser_match = adviser_pattern.match(line_clean)
+                if adviser_match:
+                    adviser_name = normalize_text_preserve_case(adviser_match.group("name"))
+
+                if normalize_text(line_clean).startswith(skip_starts):
+                    continue
+
+                row_match = row_pattern.match(line_clean)
+                if row_match:
+                    parsed_rows.append({
+                        "client_name": normalize_text_preserve_case(row_match.group("client")),
+                        "product_house": "bidvest",
+                        "commission_month": comm_month,
+                        "contract_number": normalize_text_preserve_case(row_match.group("contract")),
+                        "total_commission": row_match.group("commission"),
+                        "planner": normalize_text_preserve_case(row_match.group("planner")) or adviser_name,
+                    })
+
+            print(f"   parsed_rows count: {len(parsed_rows)}")
+
+            if len(parsed_rows) == 0:
+                print("🔴 No Bidvest PDF rows could be parsed.")
+                return None
+
+            normalized_df = pd.DataFrame(parsed_rows)
+            normalized_df["total_commission"] = coerce_series_to_numeric(
+                normalized_df["total_commission"]
+            )
+
+            normalized_df = normalized_df[
+                normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+            ].copy()
+
+            normalized_df = normalized_df[
+                normalized_df["total_commission"].notna()
+            ].copy()
+
+            normalized_df = normalized_df.reset_index(drop=True)
+
+            print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+            if normalized_df.empty:
+                print("🔴 No usable Bidvest PDF rows remain after filtering.")
+                return None
+
+            normalized_df = normalized_df[
+                [
+                    "client_name",
+                    "product_house",
+                    "commission_month",
+                    "contract_number",
+                    "total_commission",
+                    "planner",
+                ]
+            ].copy()
+
+            print("✅ Bidvest PDF normalized read complete")
+            print(normalized_df.head(10))
+            return normalized_df
+
+        # -------------------------------------------------------------------
         # Step 1: Read raw first sheet
         # -------------------------------------------------------------------
         print("🟦 Step 1: Read raw first sheet with header row")
@@ -3802,6 +4144,112 @@ def read_hollard_life_df(file_path, **kwargs):
         )
 
         # -------------------------------------------------------------------
+        # Step 0.1: PDF branch
+        # -------------------------------------------------------------------
+        if str(file_path).strip().lower().endswith(".pdf"):
+            print("🟦 Step 0.1: Hollard Life PDF branch")
+
+            pdf_lines = read_raw_pdf_text_lines_with_ocr_fallback(file_path)
+            print(f"   extracted pdf line count: {len(pdf_lines)}")
+
+            if not pdf_lines:
+                print("🔴 No PDF text lines were extracted for Hollard Life.")
+                return None
+
+            contract_pattern = re.compile(r"^\d{5,12}$")
+            date_pattern = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}$")
+            amount_pattern = re.compile(r"^\(?R[\d,]+\.\d{2}\)?$")
+
+            header_lines_to_skip = {
+                "Commission Statement",
+                "Current Tax Invoice – Detail as 30 Jan 26",
+                "Intermediary Policyholder Policy no. Date Amount",
+                "Current Tax Invoice – Summary",
+                "Account Summary",
+                "If applicable, VAT is included at standard rates as reflected in the Invoice Summary above.",
+            }
+
+            section_headers = {
+                "First year commission - increases / updates",
+                "Reversals",
+                "Second year commission",
+            }
+
+            parsed_rows = []
+            i = 0
+
+            while i < len(pdf_lines):
+                line_1 = normalize_text_preserve_case(pdf_lines[i])
+                line_2 = normalize_text_preserve_case(pdf_lines[i + 1]) if i + 1 < len(pdf_lines) else ""
+                line_3 = normalize_text_preserve_case(pdf_lines[i + 2]) if i + 2 < len(pdf_lines) else ""
+                line_4 = normalize_text_preserve_case(pdf_lines[i + 3]) if i + 3 < len(pdf_lines) else ""
+                line_5 = normalize_text_preserve_case(pdf_lines[i + 4]) if i + 4 < len(pdf_lines) else ""
+
+                if line_1 in header_lines_to_skip or line_1 in section_headers:
+                    i += 1
+                    continue
+
+                if (
+                    contract_pattern.match(line_3)
+                    and date_pattern.match(line_4)
+                    and amount_pattern.match(line_5)
+                ):
+                    parsed_rows.append({
+                        "client_name": line_2,
+                        "product_house": "hollard_life",
+                        "commission_month": comm_month,
+                        "contract_number": line_3,
+                        "total_commission": line_5,
+                        "planner": line_1 if normalize_text(line_1) != "" else "UNIFY (PTY) LTD",
+                    })
+                    i += 5
+                    continue
+
+                i += 1
+
+            print(f"   parsed_rows count: {len(parsed_rows)}")
+
+            if len(parsed_rows) == 0:
+                print("🔴 No Hollard Life PDF rows could be parsed.")
+                return None
+
+            normalized_df = pd.DataFrame(parsed_rows)
+            normalized_df["total_commission"] = coerce_series_to_numeric(
+                normalized_df["total_commission"]
+            )
+
+            normalized_df = normalized_df[
+                normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+            ].copy()
+
+            normalized_df = normalized_df[
+                normalized_df["total_commission"].notna()
+            ].copy()
+
+            normalized_df = normalized_df.reset_index(drop=True)
+
+            print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+            if normalized_df.empty:
+                print("🔴 No usable Hollard Life PDF rows remain after filtering.")
+                return None
+
+            normalized_df = normalized_df[
+                [
+                    "client_name",
+                    "product_house",
+                    "commission_month",
+                    "contract_number",
+                    "total_commission",
+                    "planner",
+                ]
+            ].copy()
+
+            print("✅ Hollard Life PDF normalized read complete")
+            print(normalized_df.head(10))
+            return normalized_df
+
+        # -------------------------------------------------------------------
         # Step 1: Read raw first sheet with header row
         # -------------------------------------------------------------------
         print("🟦 Step 1: Read raw first sheet with header row")
@@ -4541,7 +4989,111 @@ def read_old_mutual_life_invest_df(file_path, **kwargs):
         comm_month = kwargs.get("comm_month")
         print(f"   comm_month: {comm_month}")
 
+        # -------------------------------------------------------------------
+        # Step 0.1: PDF branch
+        # -------------------------------------------------------------------
+        if str(file_path).strip().lower().endswith(".pdf"):
+            print("🟦 Step 0.1: Old Mutual / Omnisure PDF branch")
 
+            pdf_lines = read_raw_pdf_text_lines_with_ocr_fallback(
+                file_path,
+                force_ocr=True,
+                zoom=2.5
+            )
+            print(f"   extracted pdf line count: {len(pdf_lines)}")
+
+            if not pdf_lines:
+                print("🔴 No OCR PDF text lines were extracted for Old Mutual / Omnisure.")
+                return None
+
+            planner_name = "UNIFY (PTY) LTD"
+            parsed_rows = []
+
+            for line in pdf_lines:
+                line_clean = normalize_text_preserve_case(line)
+                line_norm = normalize_text(line_clean)
+
+                if line_norm.startswith("policy total"):
+                    continue
+                if line_norm.startswith("monthly policy totals"):
+                    continue
+                if line_norm.startswith("due to agent"):
+                    continue
+
+                if not re.match(r"^\d{6,12}\b", line_clean):
+                    continue
+
+                amount_matches = re.findall(r"-?[\d,]+\.\d{2}", line_clean)
+                if len(amount_matches) < 2:
+                    continue
+
+                contract_match = re.match(r"^(?P<contract>\d{6,12})\b", line_clean)
+                contract_number = contract_match.group("contract") if contract_match else ""
+
+                client_match = re.search(
+                    r"^\d{6,12}\s+(?P<client>[A-Z][A-Z ,.'\-]+?)\s+\d{3,}",
+                    line_clean
+                )
+                client_name = (
+                    normalize_text_preserve_case(client_match.group("client"))
+                    if client_match else "tbc"
+                )
+
+                # Table order is usually:
+                # premium, commission, vat, bsf, paye
+                total_commission = amount_matches[1]
+
+                parsed_rows.append({
+                    "client_name": client_name,
+                    "product_house": "old_mutual_short_term",
+                    "commission_month": comm_month,
+                    "contract_number": contract_number,
+                    "total_commission": total_commission,
+                    "planner": planner_name,
+                })
+
+            print(f"   parsed_rows count: {len(parsed_rows)}")
+
+            if len(parsed_rows) == 0:
+                print("🔴 No Old Mutual / Omnisure PDF rows could be parsed.")
+                return None
+
+            normalized_df = pd.DataFrame(parsed_rows)
+            normalized_df["total_commission"] = coerce_series_to_numeric(
+                normalized_df["total_commission"]
+            )
+
+            normalized_df = normalized_df[
+                normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+            ].copy()
+
+            normalized_df = normalized_df[
+                normalized_df["total_commission"].notna()
+            ].copy()
+
+            normalized_df = normalized_df.reset_index(drop=True)
+
+            print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+            if normalized_df.empty:
+                print("🔴 No usable Old Mutual / Omnisure PDF rows remain after filtering.")
+                return None
+
+            normalized_df = normalized_df[
+                [
+                    "client_name",
+                    "product_house",
+                    "commission_month",
+                    "contract_number",
+                    "total_commission",
+                    "planner",
+                ]
+            ].copy()
+
+            print("✅ Old Mutual / Omnisure PDF normalized read complete")
+            print(normalized_df.head(10))
+            return normalized_df
+        
         # -------------------------------------------------------------------
         # Step 1: Read best matching sheet
         # -------------------------------------------------------------------
@@ -6144,6 +6696,104 @@ def read_turnberry_df(file_path, **kwargs):
         )
 
         # -------------------------------------------------------------------
+        # Step 0.1: PDF branch
+        # -------------------------------------------------------------------
+        if str(file_path).strip().lower().endswith(".pdf"):
+            print("🟦 Step 0.1: Turnberry PDF branch")
+
+            pdf_lines = read_raw_pdf_text_lines_with_ocr_fallback(file_path)
+            print(f"   extracted pdf line count: {len(pdf_lines)}")
+
+            if not pdf_lines:
+                print("🔴 No PDF text lines were extracted for Turnberry.")
+                return None
+
+            planner_name = "tbc"
+
+            for line in pdf_lines:
+                line_clean = normalize_text_preserve_case(line)
+                if "AMANDA ELOISE WALLACE" in line_clean.upper():
+                    planner_name = line_clean
+                    break
+
+            if planner_name == "tbc":
+                upper_name_lines = [
+                    normalize_text_preserve_case(x)
+                    for x in pdf_lines
+                    if re.fullmatch(r"[A-Z ,.'\-()]+", normalize_text_preserve_case(x))
+                ]
+                if len(upper_name_lines) >= 2:
+                    planner_name = upper_name_lines[1]
+                elif len(upper_name_lines) >= 1:
+                    planner_name = upper_name_lines[0]
+
+            row_pattern = re.compile(
+                r"^(?P<contract>\d{5,12})\s+"
+                r"(?P<client>.+?)\s+"
+                r"(?P<id_no>\d{13})\s+"
+                r"(?P<cover>.+?)\s+"
+                r"(?P<policy_date>\d{2}\s+[A-Z]{3}\s+\d{4})\s+"
+                r"(?P<amount>-?[\d,]+\.\d{2})$"
+            )
+
+            parsed_rows = []
+
+            for line in pdf_lines:
+                line_clean = normalize_text_preserve_case(line)
+                row_match = row_pattern.match(line_clean)
+
+                if row_match:
+                    parsed_rows.append({
+                        "client_name": normalize_text_preserve_case(row_match.group("client")),
+                        "product_house": "turnberry",
+                        "commission_month": comm_month,
+                        "contract_number": normalize_text_preserve_case(row_match.group("contract")),
+                        "total_commission": row_match.group("amount"),
+                        "planner": planner_name,
+                    })
+
+            print(f"   parsed_rows count: {len(parsed_rows)}")
+
+            if len(parsed_rows) == 0:
+                print("🔴 No Turnberry PDF rows could be parsed.")
+                return None
+
+            normalized_df = pd.DataFrame(parsed_rows)
+            normalized_df["total_commission"] = coerce_series_to_numeric(
+                normalized_df["total_commission"]
+            )
+
+            normalized_df = normalized_df[
+                normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+            ].copy()
+
+            normalized_df = normalized_df[
+                normalized_df["total_commission"].notna()
+            ].copy()
+
+            normalized_df = normalized_df.reset_index(drop=True)
+
+            print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+            if normalized_df.empty:
+                print("🔴 No usable Turnberry PDF rows remain after filtering.")
+                return None
+
+            normalized_df = normalized_df[
+                [
+                    "client_name",
+                    "product_house",
+                    "commission_month",
+                    "contract_number",
+                    "total_commission",
+                    "planner",
+                ]
+            ].copy()
+
+            print("✅ Turnberry PDF normalized read complete")
+            print(normalized_df.head(10))
+            return normalized_df
+        # -------------------------------------------------------------------
         # Step 1: Read raw first sheet for planner capture
         # -------------------------------------------------------------------
         print("🟦 Step 1: Read raw first sheet for planner capture")
@@ -6671,7 +7321,381 @@ def read_sirago_df(file_path, **kwargs):
         return None
 
 
+# ---------------------------------------------------------------------------
+# 5.4.x Reader: Nedgroup
+# ---------------------------------------------------------------------------
+@register_reader("Nedgroup")
+def read_nedgroup_df(file_path, **kwargs):
+    """
+    Reader for Nedgroup commission statement files.
 
+    Logic:
+    - if the source is an Excel / extracted workbook:
+        use the best matching sheet and map the standard columns
+    - if the source is a PDF:
+        run OCR directly inside this reader and parse the detail rows
+
+    Expected normalized output columns:
+    - client_name
+    - product_house
+    - commission_month
+    - contract_number
+    - total_commission
+    - planner
+    """
+    try:
+        print("------------------------------------------------------------")
+        print("🧾 5.4.x Reader: read_nedgroup_df")
+        print(f"   file_path: {file_path}")
+
+        # -------------------------------------------------------------------
+        # Step 0: Get passed variables
+        # -------------------------------------------------------------------
+        print("🟦 Step 0: Get passed variables")
+        comm_month = kwargs.get("comm_month")
+        comm_tables_main_df = kwargs.get("comm_tables_main_df")
+
+        print(f"   comm_month: {comm_month}")
+        print(
+            f"   comm_tables_main_df shape: "
+            f"{comm_tables_main_df.shape if isinstance(comm_tables_main_df, pd.DataFrame) else None}"
+        )
+
+        # -------------------------------------------------------------------
+        # Step 1: Detect source file extension
+        # -------------------------------------------------------------------
+        print("🟦 Step 1: Detect source file extension")
+        file_ext = os.path.splitext(str(file_path))[1].strip().lower()
+        print(f"   file_ext: {file_ext}")
+
+        # ===================================================================
+        # Branch A: PDF / OCR reader
+        # ===================================================================
+        if file_ext == ".pdf":
+            # ---------------------------------------------------------------
+            # Step 2A: OCR read Nedgroup PDF pages
+            # ---------------------------------------------------------------
+            print("🟦 Step 2A: OCR read Nedgroup PDF pages")
+
+            pdf_doc = fitz.open(file_path)
+            pdf_lines = []
+
+            for page_idx in range(len(pdf_doc)):
+                page = pdf_doc.load_page(page_idx)
+
+                # render at higher resolution for OCR
+                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+                page_text = pytesseract.image_to_string(img, config="--psm 4")
+
+                page_lines = [
+                    normalize_text_preserve_case(line)
+                    for line in str(page_text).splitlines()
+                ]
+                page_lines = [
+                    line for line in page_lines
+                    if normalize_text(line) != ""
+                ]
+
+                print(f"   pdf ocr page {page_idx + 1} line count: {len(page_lines)}")
+                pdf_lines.extend(page_lines)
+
+            pdf_doc.close()
+
+            print(f"   total pdf ocr lines: {len(pdf_lines)}")
+
+            if not pdf_lines:
+                print("🔴 No OCR lines were extracted from the Nedgroup PDF.")
+                return None
+
+            # ---------------------------------------------------------------
+            # Step 3A: Extract planner name from PDF header
+            # ---------------------------------------------------------------
+            print("🟦 Step 3A: Extract planner name from PDF header")
+
+            planner_name = "tbc"
+
+            for line in pdf_lines:
+                line_norm = normalize_text(line)
+
+                if line_norm.startswith("financial planner "):
+                    candidate = re.sub(r"(?i)^financial planner\s+", "", str(line)).strip()
+
+                    if normalize_text(candidate) not in ["", "summary"]:
+                        planner_name = normalize_text_preserve_case(candidate)
+                        break
+
+            if planner_name == "tbc":
+                for line in pdf_lines:
+                    line_norm = normalize_text(line)
+
+                    if line_norm.startswith("business name "):
+                        candidate = re.sub(r"(?i)^business name\s+", "", str(line)).strip()
+
+                        if normalize_text(candidate) != "":
+                            planner_name = normalize_text_preserve_case(candidate)
+                            break
+
+            print(f"   planner_name: {planner_name}")
+
+            # ---------------------------------------------------------------
+            # Step 4A: Parse transactional rows from OCR lines
+            # ---------------------------------------------------------------
+            print("🟦 Step 4A: Parse transactional rows from OCR lines")
+
+            row_pattern = re.compile(
+                r"(?P<client>.+?)\s+"
+                r"(?P<investor_number>\d{6,10})\s+"
+                r"(?P<account_group_number>\d{4,7})\s+"
+                r"(?P<account_number>\d{5,10})\s+"
+                r".+?\s+"
+                r"Clear\w*\s+"
+                r"(?P<annual_fee_pct>\d+\.\d+%)\s+"
+                r"(?P<annual_fee_excl_vat>R?[0-9O.,]+)\s+"
+                r"(?P<vat>R?[0-9O.,]+)\s+"
+                r"(?P<fees_earned>R?[0-9O.,]+)$",
+                re.IGNORECASE
+            )
+
+            parsed_rows = []
+            carry_client_prefix = ""
+
+            for line_idx, line in enumerate(pdf_lines):
+                line_clean = normalize_text_preserve_case(line)
+                line_clean = (
+                    line_clean
+                    .replace("—", " ")
+                    .replace("–", " ")
+                    .replace("_", " ")
+                )
+                line_clean = re.sub(r"\s+", " ", line_clean).strip()
+
+                # store short prefix-only client lines if OCR split the row
+                if re.fullmatch(r"(Mr|Mrs|Ms|Dr)\s+[A-Za-z .'\-]+", line_clean):
+                    carry_client_prefix = line_clean
+                    continue
+
+                row_match = row_pattern.search(line_clean)
+
+                if row_match:
+                    client_name = normalize_text_preserve_case(row_match.group("client"))
+
+                    # where OCR splits a client title from the surname line,
+                    # lightly stitch the pieces together
+                    if (
+                        carry_client_prefix != ""
+                        and len(client_name.split()) <= 2
+                        and not re.match(r"^(Mr|Mrs|Ms|Dr)\b", client_name, flags=re.IGNORECASE)
+                    ):
+                        client_name = f"{carry_client_prefix} {client_name}".strip()
+
+                    total_commission_text = (
+                        str(row_match.group("fees_earned"))
+                        .replace("O", "0")
+                        .replace("o", "0")
+                    )
+
+                    parsed_rows.append({
+                        "client_name": client_name,
+                        "product_house": "nedgroup",
+                        "commission_month": comm_month,
+                        "contract_number": normalize_text_preserve_case(
+                            row_match.group("account_number")
+                        ),
+                        "total_commission": total_commission_text,
+                        "planner": planner_name,
+                    })
+
+            print(f"   parsed_rows count: {len(parsed_rows)}")
+
+            if len(parsed_rows) == 0:
+                print("🔴 No Nedgroup PDF rows could be parsed.")
+                return None
+
+            # ---------------------------------------------------------------
+            # Step 5A: Build normalized output df from parsed PDF rows
+            # ---------------------------------------------------------------
+            print("🟦 Step 5A: Build normalized output df from parsed PDF rows")
+
+            normalized_df = pd.DataFrame(parsed_rows)
+            normalized_df["total_commission"] = coerce_series_to_numeric(
+                normalized_df["total_commission"]
+            )
+
+        # ===================================================================
+        # Branch B: Excel / extracted workbook reader
+        # ===================================================================
+        else:
+            # ---------------------------------------------------------------
+            # Step 2B: Read best matching Nedgroup sheet
+            # ---------------------------------------------------------------
+            print("🟦 Step 2B: Read best matching Nedgroup sheet")
+
+            required_column_candidates = [
+                ["Investor", "Client Name", "Client", "Investor Name"],
+                ["Account number", "Account No", "Contract Number", "Policy Number", "Policy No"],
+                ["Fees earned (incl. VAT)", "Fees earned", "Commission", "Total paid"],
+            ]
+
+            source_sheet_name, df = read_best_matching_sheet_by_required_columns(
+                file_path=file_path,
+                required_column_candidates=required_column_candidates,
+                header=0,
+                exclude_sheet_names=["processed_comms", "processed_data"]
+            )
+
+            print(f"   source_sheet_name: {source_sheet_name}")
+
+            if df is None or df.empty:
+                print("🔴 No usable Nedgroup sheet could be identified.")
+                return None
+
+            print(f"   raw shape: {df.shape}")
+            print(f"   columns after normalization: {list(df.columns)}")
+
+            # ---------------------------------------------------------------
+            # Step 3B: Drop fully blank rows
+            # ---------------------------------------------------------------
+            print("🟦 Step 3B: Drop fully blank rows")
+            df = drop_fully_blank_rows(df)
+            print(f"   shape after blank-row cleanup: {df.shape}")
+
+            if df.empty:
+                print("🔴 No usable Nedgroup rows remain after blank-row cleanup.")
+                return None
+
+            # ---------------------------------------------------------------
+            # Step 4B: Detect source columns
+            # ---------------------------------------------------------------
+            print("🟦 Step 4B: Detect source columns")
+
+            client_name_col = find_matching_column(
+                df.columns,
+                ["Investor", "Client Name", "Client", "Investor Name"]
+            )
+            contract_col = find_matching_column(
+                df.columns,
+                ["Account number", "Account No", "Contract Number", "Policy Number", "Policy No"]
+            )
+            total_commission_col = find_matching_column(
+                df.columns,
+                ["Fees earned (incl. VAT)", "Fees earned", "Commission", "Total paid"]
+            )
+            planner_col = find_matching_column(
+                df.columns,
+                ["Financial planner", "Planner", "Broker", "Intermediary"]
+            )
+
+            print(f"   client_name_col       : {client_name_col}")
+            print(f"   contract_col          : {contract_col}")
+            print(f"   total_commission_col  : {total_commission_col}")
+            print(f"   planner_col           : {planner_col}")
+
+            if contract_col is None or total_commission_col is None:
+                print("🔴 Required Nedgroup columns could not be identified.")
+                return None
+
+            # ---------------------------------------------------------------
+            # Step 5B: Build normalized output df
+            # ---------------------------------------------------------------
+            print("🟦 Step 5B: Build normalized output df")
+
+            normalized_df = pd.DataFrame()
+
+            if client_name_col:
+                normalized_df["client_name"] = (
+                    df[client_name_col]
+                    .apply(normalize_text_preserve_case)
+                    .replace("", "tbc")
+                )
+            else:
+                normalized_df["client_name"] = "tbc"
+
+            normalized_df["product_house"] = "nedgroup"
+            normalized_df["commission_month"] = comm_month
+
+            contract_series = df[contract_col]
+            normalized_df["contract_number"] = contract_series.apply(
+                lambda x: ""
+                if pd.isna(x)
+                else (
+                    str(int(x))
+                    if isinstance(x, (int, float)) and float(x).is_integer()
+                    else normalize_text_preserve_case(x)
+                )
+            )
+
+            normalized_df["total_commission"] = coerce_series_to_numeric(
+                df[total_commission_col]
+            )
+
+            if planner_col:
+                normalized_df["planner"] = (
+                    df[planner_col]
+                    .apply(normalize_text_preserve_case)
+                    .replace("", "tbc")
+                )
+            else:
+                normalized_df["planner"] = "tbc"
+
+        # -------------------------------------------------------------------
+        # Step 6: Filter invalid rows
+        # -------------------------------------------------------------------
+        print("🟦 Step 6: Filter invalid rows")
+
+        normalized_df = normalized_df[
+            normalized_df["contract_number"].apply(lambda x: normalize_text(x) != "")
+        ].copy()
+
+        normalized_df = normalized_df[
+            normalized_df["total_commission"].notna()
+        ].copy()
+
+        normalized_df = normalized_df[
+            ~normalized_df["client_name"].apply(
+                lambda x: normalize_text(x) in ["total", "subtotal", "sub total", "totals:"]
+            )
+        ].copy()
+
+        normalized_df = normalized_df[
+            ~normalized_df["contract_number"].apply(
+                lambda x: normalize_text(x) in ["total", "subtotal", "sub total", "totals:"]
+            )
+        ].copy()
+
+        normalized_df = normalized_df.reset_index(drop=True)
+        print(f"   normalized_df shape after filters: {normalized_df.shape}")
+
+        if normalized_df.empty:
+            print("🔴 No usable Nedgroup rows remain after filtering.")
+            return None
+
+        # -------------------------------------------------------------------
+        # Step 7: Reorder final columns
+        # -------------------------------------------------------------------
+        print("🟦 Step 7: Reorder final columns")
+
+        normalized_df = normalized_df[
+            [
+                "client_name",
+                "product_house",
+                "commission_month",
+                "contract_number",
+                "total_commission",
+                "planner",
+            ]
+        ].copy()
+
+        print("✅ Nedgroup normalized read complete")
+        print(normalized_df.head(10))
+
+        return normalized_df
+
+    except Exception as e:
+        print(f"🔴 Error in read_nedgroup_df: {e}")
+        print(traceback.format_exc())
+        return None
 
 
 
